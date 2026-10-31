@@ -154,7 +154,7 @@ impl StatsPanel {
             .as_ref()
             .is_some_and(|c| c.kind == ColumnKind::Number);
         let nulls = summary.null_percent / 100.0;
-        let null_count = (summary.count as f64 * nulls).round() as u64;
+        let null_count = summary.nulls;
         let facts = [
             Self::fact("Rows", Some(group_digits(summary.count)), cx),
             Self::fact(

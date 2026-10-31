@@ -11,6 +11,8 @@ use crate::sql::quote_ident;
 pub struct ColumnSummary {
     pub name: String,
     pub count: u64,
+    /// Exact, unlike SUMMARIZE's two-decimal percentage, so one null in millions shows.
+    pub nulls: u64,
     pub null_percent: f64,
     /// Approximate (HyperLogLog), which is what makes this fast on big files.
     pub distinct: u64,
@@ -54,7 +56,28 @@ impl Dataset {
     /// SUMMARIZE for every column of `frame`.
     pub fn summarize(&self, frame: &Frame) -> Result<Vec<ColumnSummary>> {
         let conn = self.connection()?;
-        summarize(&conn, &format!("SELECT * FROM {}", frame.relation))
+        let mut summaries = summarize(&conn, &format!("SELECT * FROM {}", frame.relation))?;
+        if summaries.is_empty() {
+            return Ok(summaries);
+        }
+        // SUMMARIZE rounds null_percentage to two decimals; count nulls exactly.
+        let counts = summaries
+            .iter()
+            .map(|s| format!("count(*) - count({})", quote_ident(&s.name)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let nulls: Vec<i64> = conn.query_row(
+            &format!("SELECT {counts} FROM {}", frame.relation),
+            [],
+            |r| (0..summaries.len()).map(|i| r.get(i)).collect(),
+        )?;
+        for (summary, nulls) in summaries.iter_mut().zip(nulls) {
+            summary.nulls = nulls as u64;
+            if summary.count > 0 {
+                summary.null_percent = nulls as f64 * 100.0 / summary.count as f64;
+            }
+        }
+        Ok(summaries)
     }
 
     /// Exact distribution for one column, for the stats panel.
@@ -101,6 +124,7 @@ fn summarize(conn: &Connection, select: &str) -> Result<Vec<ColumnSummary>> {
         Ok(ColumnSummary {
             name: r.get(0)?,
             count: r.get::<_, i64>(1)? as u64,
+            nulls: 0,
             null_percent: r.get::<_, Option<f64>>(2)?.unwrap_or(0.0),
             distinct: r.get::<_, Option<i64>>(3)?.unwrap_or(0) as u64,
             min: r.get(4)?,

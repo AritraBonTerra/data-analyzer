@@ -401,6 +401,21 @@ fn histograms_skip_infinite_values() {
 }
 
 #[test]
+fn counts_sparse_nulls_exactly() {
+    let s = Scratch::new();
+    let mut csv = String::from("x\n");
+    for i in 0..100_000 {
+        csv.push_str(&format!("{i}\n"));
+    }
+    csv.push('\n'); // one null in 100,001 rows rounds to 0.00% in SUMMARIZE
+    let ds = s.open(&s.write("sparse.csv", &csv));
+    let frame = ds.materialize(&|_| {}).unwrap();
+    let summary = &ds.summarize(&frame).unwrap()[0];
+    assert_eq!(summary.nulls, 1);
+    assert!(summary.null_percent > 0.0);
+}
+
+#[test]
 fn sql_queries() {
     let s = Scratch::new();
     let (ds, _) = numbers(&s);
