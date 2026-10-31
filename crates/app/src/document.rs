@@ -165,6 +165,8 @@ pub struct Document {
     /// Separate from `apply_generation`, so sorting or filtering while SQL runs
     /// doesn't drop the query's result and leave its panel stuck on "Running".
     query_generation: u64,
+    /// The user pressed Cancel on the running query (vs. a newer request superseding it).
+    query_cancel_requested: bool,
     open_generation: u64,
     profile: Option<Profile>,
     selected_column: Option<usize>,
@@ -242,6 +244,7 @@ impl Document {
             busy: Busy::Idle,
             apply_generation: 0,
             query_generation: 0,
+            query_cancel_requested: false,
             open_generation: 0,
             profile: None,
             selected_column: None,
@@ -914,6 +917,7 @@ impl Document {
         match event {
             SqlEvent::Run(sql) => self.run_query(sql.clone(), cx),
             SqlEvent::Cancel => {
+                self.query_cancel_requested = true;
                 if let Some(dataset) = &self.dataset {
                     dataset.cancel_query();
                 }
@@ -930,10 +934,14 @@ impl Document {
             .update(cx, |panel, cx| panel.set_status(QueryStatus::Running, cx));
         self.busy = Busy::Querying;
         self.query_generation += 1;
+        self.query_cancel_requested = false;
         let generation = self.query_generation;
         cx.spawn(async move |this, cx| {
             let outcome = cx
-                .background_spawn(async move { dataset.query(&sql) })
+                .background_spawn({
+                    let sql = sql.clone();
+                    async move { dataset.query(&sql) }
+                })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 if this.query_generation != generation {
@@ -954,6 +962,12 @@ impl Document {
                         QueryStatus::Rows(rows)
                     }
                     Ok(SqlOutcome::Done) => QueryStatus::Done,
+                    // Without a Cancel press, only an older worker racing ahead
+                    // can cancel the newest query, so run it again.
+                    Err(err) if err.is::<Cancelled>() && !this.query_cancel_requested => {
+                        this.run_query(sql, cx);
+                        return;
+                    }
                     Err(err) if err.is::<Cancelled>() => QueryStatus::Idle,
                     Err(err) => QueryStatus::Error(format!("{err:#}")),
                 };

@@ -155,7 +155,7 @@ fn histogram(
     let mut stmt = conn.prepare(&format!(
         "SELECT least(CAST(floor(({x} - {lo}) / {width}) AS BIGINT), {last}) AS b,
                 count(*), CAST(min({col}) AS VARCHAR), CAST(max({col}) AS VARCHAR)
-         FROM {relation} WHERE {col} IS NOT NULL GROUP BY b ORDER BY b",
+         FROM {relation} WHERE {col} IS NOT NULL GROUP BY 1 ORDER BY 1",
         last = bins - 1,
     ))?;
     let mut out: Vec<Bin> = (0..bins)
@@ -195,7 +195,7 @@ fn categories(conn: &Connection, relation: &str, col: &str, top: usize) -> Resul
     }
     let mut stmt = conn.prepare(&format!(
         "SELECT CAST({col} AS VARCHAR) AS v, count(*) AS n FROM {relation}
-         GROUP BY v ORDER BY n DESC, v NULLS LAST LIMIT {top}"
+         GROUP BY 1 ORDER BY 2 DESC, 1 NULLS LAST LIMIT {top}"
     ))?;
     let values = stmt
         .query_map([], |r| {
@@ -209,12 +209,18 @@ fn categories(conn: &Connection, relation: &str, col: &str, top: usize) -> Resul
     })
 }
 
-/// Trims long decimals from SUMMARIZE's text (e.g. `12.345678901234` → `12.3457`).
-/// Leaves dates and other text alone.
+/// Trims long decimals from SUMMARIZE's text (e.g. `12.345678901234` → `12.3457`),
+/// keeping about five significant digits for values below 1. Leaves dates,
+/// other text, and very large or tiny numbers alone.
 pub fn tidy_number(value: &str) -> String {
     match value.parse::<f64>() {
-        Ok(n) if value.contains('.') && n.abs() < 1e15 => {
-            let rounded = format!("{n:.4}");
+        Ok(n) if value.contains('.') && n.abs() < 1e15 && (n == 0.0 || n.abs() >= 1e-8) => {
+            let decimals = if n == 0.0 || n.abs() >= 1.0 {
+                4
+            } else {
+                (4 - n.abs().log10().floor() as i32) as usize
+            };
+            let rounded = format!("{n:.decimals$}");
             rounded
                 .trim_end_matches('0')
                 .trim_end_matches('.')
@@ -234,6 +240,9 @@ mod tests {
         assert_eq!(tidy_number("-0.5000001"), "-0.5");
         assert_eq!(tidy_number("3.0"), "3");
         assert_eq!(tidy_number("42"), "42");
+        assert_eq!(tidy_number("0.000123456789"), "0.00012346");
+        assert_eq!(tidy_number("1.234e-08"), "0.00000001234");
+        assert_eq!(tidy_number("1.5e-12"), "1.5e-12");
         assert_eq!(
             tidy_number("2024-01-02 03:04:05.5"),
             "2024-01-02 03:04:05.5"

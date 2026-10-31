@@ -362,6 +362,22 @@ fn summaries_and_distributions() {
 }
 
 #[test]
+fn stats_work_with_columns_named_like_aliases() {
+    let s = Scratch::new();
+    let mut csv = String::from("v,b,n\n");
+    for i in 0..50 {
+        csv.push_str(&format!("{},{},{i}\n", i % 3, i % 5));
+    }
+    let ds = s.open(&s.write("alias.csv", &csv));
+    let frame = ds.materialize(&|_| {}).unwrap();
+    assert_eq!(ds.sketches(&frame).unwrap().len(), 3);
+    assert!(matches!(
+        ds.distribution(&frame, &frame.columns[2], 10, 5).unwrap(),
+        Distribution::Histogram(_)
+    ));
+}
+
+#[test]
 fn sql_queries() {
     let s = Scratch::new();
     let (ds, _) = numbers(&s);
