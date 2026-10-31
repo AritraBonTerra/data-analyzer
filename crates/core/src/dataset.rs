@@ -540,7 +540,8 @@ impl Dataset {
         }
         let table = format!("_query_{}", self.next_id());
         let as_table =
-            conn.execute_batch(&format!("CREATE TABLE {table} AS SELECT * FROM ({sql})"));
+            // The newline keeps a trailing `-- comment` from swallowing the `)`.
+            conn.execute_batch(&format!("CREATE TABLE {table} AS SELECT * FROM ({sql}\n)"));
         let cancelled = || !is_current(&self.query_interrupt, &handle);
         match as_table {
             Ok(()) => {

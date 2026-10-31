@@ -419,6 +419,8 @@ fn sql_queries() {
         ds.query("SUMMARIZE data").unwrap(),
         SqlOutcome::Rows(_)
     ));
+    let commented = ds.query("SELECT 1 AS x -- trailing comment").unwrap();
+    assert!(matches!(commented, SqlOutcome::Rows(f) if f.rows == Some(1)));
     assert!(matches!(
         ds.query("CREATE TABLE t AS SELECT 1 AS x").unwrap(),
         SqlOutcome::Done

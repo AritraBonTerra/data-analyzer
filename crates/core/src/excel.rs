@@ -156,8 +156,13 @@ fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
 fn text(cell: &Data) -> String {
     match cell {
         Data::DateTime(dt) if dt.is_datetime() => {
-            let (y, mo, d, h, mi, s, _) = dt.to_ymd_hms_milli();
-            format!("{y:04}-{mo:02}-{d:02} {h:02}:{mi:02}:{s:02}")
+            let (y, mo, d, h, mi, s, ms) = dt.to_ymd_hms_milli();
+            let fraction = if ms > 0 {
+                format!(".{ms:03}")
+            } else {
+                String::new()
+            };
+            format!("{y:04}-{mo:02}-{d:02} {h:02}:{mi:02}:{s:02}{fraction}")
         }
         // Durations are stored as fractional days; show elapsed h:mm:ss.
         Data::DateTime(dt) => {
@@ -220,6 +225,16 @@ mod tests {
         assert_eq!(infer([Data::Bool(true)].iter()), ColType::Boolean);
         assert_eq!(infer([Data::Int(1), s("x")].iter()), ColType::Varchar);
         assert_eq!(infer([Data::Empty].iter()), ColType::Varchar);
+    }
+
+    #[test]
+    fn mixed_column_timestamps_keep_milliseconds() {
+        use calamine::{ExcelDateTime, ExcelDateTimeType};
+        // 2025-10-13 12:59:02.400 and midnight on the same day.
+        let precise = ExcelDateTime::new(45943.541, ExcelDateTimeType::DateTime, false);
+        let midnight = ExcelDateTime::new(45943.0, ExcelDateTimeType::DateTime, false);
+        assert_eq!(text(&Data::DateTime(precise)), "2025-10-13 12:59:02.400");
+        assert_eq!(text(&Data::DateTime(midnight)), "2025-10-13 00:00:00");
     }
 
     #[test]
