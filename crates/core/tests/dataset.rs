@@ -436,6 +436,21 @@ fn session_files_are_removed_on_drop() {
 }
 
 #[test]
+fn removes_own_sessions_on_quit() {
+    let s = Scratch::new();
+    let cache = s.0.join("cache");
+    let ds = s.open(&s.write("x.csv", "a\n1\n"));
+    std::fs::create_dir_all(cache.join("session-1-0")).unwrap(); // pid 1 (launchd) is alive
+    remove_own_sessions(&cache);
+    let left: Vec<_> = std::fs::read_dir(&cache)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    assert_eq!(left, ["session-1-0"]);
+    drop(ds);
+}
+
+#[test]
 fn rejects_unknown_files() {
     let s = Scratch::new();
     let path = s.write("x.png", "nope");

@@ -17,7 +17,7 @@ mod sql;
 
 pub use dataset::{
     Cancelled, Column, ColumnKind, Dataset, ExportFormat, Frame, OpenOptions, Page, SqlOutcome,
-    clean_cache,
+    clean_cache, remove_own_sessions,
 };
 pub use excel::sheet_names;
 pub use format::FileKind;

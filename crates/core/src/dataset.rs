@@ -569,6 +569,18 @@ static SESSION_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// Deletes scratch databases left by earlier runs that exited without cleaning
 /// up. Only removes `session-<pid>-*` folders whose process is gone.
 pub fn clean_cache(cache_dir: &Path) {
+    remove_sessions(cache_dir, |pid| {
+        pid as u32 != std::process::id() && !process_alive(pid)
+    });
+}
+
+/// Deletes this process's scratch databases. Call on quit, when open datasets
+/// won't get dropped; the next launch's [`clean_cache`] is the fallback.
+pub fn remove_own_sessions(cache_dir: &Path) {
+    remove_sessions(cache_dir, |pid| pid as u32 == std::process::id());
+}
+
+fn remove_sessions(cache_dir: &Path, should_remove: impl Fn(i32) -> bool) {
     let Ok(entries) = std::fs::read_dir(cache_dir) else {
         return;
     };
@@ -582,7 +594,7 @@ pub fn clean_cache(cache_dir: &Path) {
         else {
             continue;
         };
-        if pid as u32 != std::process::id() && !process_alive(pid) {
+        if should_remove(pid) {
             let _ = std::fs::remove_dir_all(entry.path());
         }
     }

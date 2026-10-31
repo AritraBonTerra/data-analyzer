@@ -87,6 +87,12 @@ fn main() {
         ));
         cx.background_spawn(async { da_core::clean_cache(&platform::cache_dir()) })
             .detach();
+        // Open datasets aren't dropped on quit, so delete their scratch files here.
+        cx.on_app_quit(|_| {
+            da_core::remove_own_sessions(&platform::cache_dir());
+            async {}
+        })
+        .detach();
 
         cx.bind_keys([
             KeyBinding::new("cmd-o", Open, None),
