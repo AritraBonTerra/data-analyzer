@@ -133,8 +133,12 @@ fn main() {
         });
         // Fallback when no window content handled ⌘W (e.g. nothing focused).
         cx.on_action(|_: &CloseWindow, cx| {
-            if let Some(window) = cx.active_window() {
-                let _ = window.update(cx, |_, window, _| window.remove_window());
+            for handle in cx.windows() {
+                let _ = handle.update(cx, |_, window, _| {
+                    if window.is_window_active() {
+                        window.remove_window();
+                    }
+                });
             }
         });
 
@@ -145,7 +149,7 @@ fn main() {
         })
         .detach();
         cx.observe_global::<Theme>(refresh_menus).detach();
-        refresh_menus(cx);
+        rebuild_menus(cx);
 
         cx.spawn(async move |cx| {
             while let Some(urls) = urls_rx.next().await {
@@ -258,15 +262,17 @@ fn open_dialog(cx: &mut App) {
     .detach();
 }
 
-/// Like [`refresh_menus`], but after the current update finishes. Use this
-/// from inside an entity update, since rebuilding reads the active document.
-pub fn refresh_menus_later(cx: &mut App) {
-    cx.defer(refresh_menus);
+/// Rebuilds the menu bar once the current update finishes; call after
+/// anything it reflects changes (recent files, panel visibility).
+///
+/// Always deferred: rebuilding reads the active window's document, and
+/// reading an entity that is mid-update panics, which aborts the app when
+/// it happens inside a key-event handler.
+pub fn refresh_menus(cx: &mut App) {
+    cx.defer(rebuild_menus);
 }
 
-/// Rebuilds the menu bar; call after anything it reflects changes (recent
-/// files, panel visibility).
-pub fn refresh_menus(cx: &mut App) {
+fn rebuild_menus(cx: &mut App) {
     let (stats, sql) = cx
         .active_window()
         .and_then(|handle| {

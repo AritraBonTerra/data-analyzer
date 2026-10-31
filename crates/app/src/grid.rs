@@ -361,10 +361,9 @@ impl TableDelegate for GridDelegate {
                 .p_0();
         }
         let col = col_ix - 1;
-        let Some(frame) = &self.frame else {
+        let Some(column) = self.frame.as_ref().and_then(|f| f.columns.get(col)) else {
             return Column::new("", "");
         };
-        let column = &frame.columns[col];
         let width = self.widths.get(col).copied().unwrap_or(140.0);
         Column::new(column.name.clone(), column.name.clone())
             .width(px(width))
@@ -390,10 +389,9 @@ impl TableDelegate for GridDelegate {
             return div().size_full().bg(palette.gutter).into_any_element();
         }
         let col = col_ix - 1;
-        let Some(frame) = &self.frame else {
+        let Some(column) = self.frame.as_ref().and_then(|f| f.columns.get(col)) else {
             return div().into_any_element();
         };
-        let column = &frame.columns[col];
         let name: SharedString = column.name.clone().into();
         let is_number = column.kind == ColumnKind::Number;
         let sort = self.sort_state(&column.name);
@@ -553,7 +551,8 @@ impl TableDelegate for GridDelegate {
         let is_number = self
             .frame
             .as_ref()
-            .is_some_and(|f| f.columns[col].kind == ColumnKind::Number);
+            .and_then(|f| f.columns.get(col))
+            .is_some_and(|c| c.kind == ColumnKind::Number);
         match self.cache.cell(row_ix as u64, col) {
             None => {
                 // Not loaded yet: a quiet placeholder bar.

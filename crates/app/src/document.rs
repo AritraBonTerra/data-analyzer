@@ -602,11 +602,14 @@ impl Document {
             InputEvent::PressEnter { .. } => {
                 let text = self.goto.read(cx).value().replace(',', "");
                 let rows = self.table.read(cx).delegate().rows();
+                let has_columns = self.view.as_ref().is_some_and(|f| !f.columns.is_empty());
                 if let (Ok(n), true) = (text.trim().parse::<u64>(), rows > 0) {
                     let row = (n.clamp(1, rows) - 1) as usize;
                     self.table.update(cx, |table, cx| {
                         table.scroll_to_row(row, cx);
-                        table.set_selected_cell(row, 1, cx);
+                        if has_columns {
+                            table.set_selected_cell(row, 1, cx);
+                        }
                     });
                 }
                 self.goto_open = false;
@@ -796,7 +799,7 @@ impl Document {
                 self.show_stats = true;
                 self.selected_column = Some(*col);
                 self.refresh_stats(cx);
-                crate::refresh_menus_later(cx);
+                crate::refresh_menus(cx);
             }
             FilterEvent::Dismiss => {}
         }
@@ -813,7 +816,7 @@ impl Document {
             StatsEvent::AddFilter(filter) => self.add_filter(filter.clone(), cx),
             StatsEvent::Close => {
                 self.show_stats = false;
-                crate::refresh_menus_later(cx);
+                crate::refresh_menus(cx);
                 cx.notify();
             }
         }
@@ -853,7 +856,7 @@ impl Document {
             self.selected_column = Some(0);
         }
         self.refresh_stats(cx);
-        crate::refresh_menus_later(cx);
+        crate::refresh_menus(cx);
         cx.notify();
     }
 
@@ -862,7 +865,7 @@ impl Document {
         if self.show_sql {
             self.sql.update(cx, |sql, cx| sql.focus(window, cx));
         }
-        crate::refresh_menus_later(cx);
+        crate::refresh_menus(cx);
         cx.notify();
     }
 

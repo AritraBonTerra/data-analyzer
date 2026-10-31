@@ -67,6 +67,10 @@ impl Workspace {
             .push(cx.subscribe_in(&welcome, window, Self::on_welcome_event));
         self.content = Content::Welcome(welcome);
         window.set_window_title("Data Analyzer");
+        // Give the window a focused element so window-level shortcuts (⌘W,
+        // ⌘O…) dispatch through this view's action handlers.
+        let focus = self.focus_handle.clone();
+        window.defer(cx, move |window, cx| focus.focus(window, cx));
         cx.notify();
     }
 
@@ -97,7 +101,7 @@ impl Workspace {
                 let path = path.clone();
                 cx.global_mut::<crate::recent::RecentStore>()
                     .edit(|files| files.remove(&path));
-                crate::refresh_menus_later(cx);
+                crate::refresh_menus(cx);
             }
         }
     }
