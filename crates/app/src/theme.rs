@@ -1,0 +1,90 @@
+//! Visual tokens layered on top of gpui-component's theme: the few colours and
+//! text styles that are specific to a data grid, and small styling helpers so
+//! every module spells them the same way.
+
+use std::sync::Arc;
+
+use da_core::ColumnKind;
+use gpui_kit::component::ActiveTheme;
+use gpui_kit::*;
+
+/// Row height in the grid. Tight enough to show plenty of rows, roomy enough to read.
+pub const ROW_HEIGHT: f32 = 26.0;
+/// Header height: a name row plus a sketch row.
+pub const HEADER_HEIGHT: f32 = 54.0;
+/// Height of the window's unified toolbar.
+pub const TOOLBAR_HEIGHT: f32 = 46.0;
+/// Width of the stats side panel.
+pub const STATS_WIDTH: f32 = 312.0;
+
+/// Enables tabular figures so digits line up in columns and counters don't jitter.
+pub fn tabular() -> FontFeatures {
+    FontFeatures(Arc::new(vec![("tnum".into(), 1)]))
+}
+
+/// Colours that depend on the active appearance but aren't in the base theme.
+pub struct Palette {
+    /// The one colour for data marks: charts, sort arrows, filter chips.
+    pub accent: Hsla,
+    /// Dim ink for NULL markers and placeholders.
+    pub null: Hsla,
+    /// Fill for sketch bars and charts.
+    pub chart: Hsla,
+    /// Chart fill when the bar is hovered or selected.
+    pub chart_strong: Hsla,
+    /// Light chart track behind bars.
+    pub chart_track: Hsla,
+    /// Row-number gutter background.
+    pub gutter: Hsla,
+    /// Background of the header and toolbars.
+    pub chrome: Hsla,
+    /// Warm ink for notices.
+    pub warning: Hsla,
+}
+
+pub fn palette(cx: &App) -> Palette {
+    let theme = cx.theme();
+    let dark = theme.is_dark();
+    let accent = if dark {
+        hsla(214. / 360., 0.86, 0.68, 1.0)
+    } else {
+        hsla(214. / 360., 0.78, 0.48, 1.0)
+    };
+    Palette {
+        accent,
+        null: theme.muted_foreground.opacity(0.55),
+        chart: accent.opacity(if dark { 0.6 } else { 0.5 }),
+        chart_strong: accent,
+        chart_track: theme.foreground.opacity(if dark { 0.08 } else { 0.05 }),
+        gutter: theme
+            .background
+            .blend(theme.foreground.opacity(if dark { 0.04 } else { 0.025 })),
+        chrome: theme
+            .background
+            .blend(theme.foreground.opacity(if dark { 0.03 } else { 0.02 })),
+        warning: if dark {
+            hsla(38. / 360., 0.9, 0.62, 1.0)
+        } else {
+            hsla(32. / 360., 0.85, 0.38, 1.0)
+        },
+    }
+}
+
+/// The glyph that marks a column's type in headers and the stats panel.
+pub fn kind_icon(kind: ColumnKind) -> &'static str {
+    match kind {
+        ColumnKind::Number => "icons/hash.svg",
+        ColumnKind::Text => "icons/type.svg",
+        ColumnKind::Temporal => "icons/calendar.svg",
+        ColumnKind::Boolean => "icons/toggle-left.svg",
+        ColumnKind::Other => "icons/braces.svg",
+    }
+}
+
+/// A keyboard-shortcut style hint, e.g. `⌘F`.
+pub fn shortcut_hint(text: &'static str, cx: &App) -> Div {
+    div()
+        .text_xs()
+        .text_color(cx.theme().muted_foreground.opacity(0.7))
+        .child(text)
+}

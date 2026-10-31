@@ -10,5 +10,9 @@ path = "src/main.rs"
 
 [dependencies]
 da-core = { path = "../core" }
-gpui-kit = "=0.8.1"
+gpui-kit = { version = "=0.8.1", features = ["syntect"] }
 anyhow = "1"
+futures = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+percent-encoding = "2"
