@@ -76,13 +76,16 @@ impl Dataset {
             "CREATE TEMP TABLE {sample} AS SELECT * FROM {} USING SAMPLE reservoir({SKETCH_SAMPLE_ROWS} ROWS) REPEATABLE (7)",
             frame.relation
         ))?;
+        // One column that can't be profiled shouldn't hide every other sketch.
         let sketches = frame
             .columns
             .iter()
-            .map(|column| distribution(&conn, &sample, column, 24, 3))
+            .map(|column| {
+                distribution(&conn, &sample, column, 24, 3).unwrap_or(Distribution::Empty)
+            })
             .collect();
         conn.execute_batch(&format!("DROP TABLE IF EXISTS {sample}"))?;
-        sketches
+        Ok(sketches)
     }
 }
 
@@ -128,7 +131,11 @@ fn distribution(
     };
     if let Some(x) = numeric {
         let (lo, hi, distinct): (Option<f64>, Option<f64>, i64) = conn.query_row(
-            &format!("SELECT min({x}), max({x}), approx_count_distinct({col}) FROM {relation}"),
+            // Bins span finite values only; ±inf and NaN would make the bin width non-finite.
+            &format!(
+                "SELECT min({x}) FILTER (isfinite({x})), max({x}) FILTER (isfinite({x})),
+                        approx_count_distinct({col}) FROM {relation}"
+            ),
             [],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )?;
@@ -155,7 +162,7 @@ fn histogram(
     let mut stmt = conn.prepare(&format!(
         "SELECT least(CAST(floor(({x} - {lo}) / {width}) AS BIGINT), {last}) AS b,
                 count(*), CAST(min({col}) AS VARCHAR), CAST(max({col}) AS VARCHAR)
-         FROM {relation} WHERE {col} IS NOT NULL GROUP BY 1 ORDER BY 1",
+         FROM {relation} WHERE isfinite({x}) GROUP BY 1 ORDER BY 1",
         last = bins - 1,
     ))?;
     let mut out: Vec<Bin> = (0..bins)

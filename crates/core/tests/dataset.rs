@@ -378,6 +378,29 @@ fn stats_work_with_columns_named_like_aliases() {
 }
 
 #[test]
+fn histograms_skip_infinite_values() {
+    let s = Scratch::new();
+    let mut csv = String::from("x\n");
+    for i in 1..=20 {
+        csv.push_str(&format!("{i}.5\n"));
+    }
+    csv.push_str("inf\n-inf\nnan\n");
+    let ds = s.open(&s.write("inf.csv", &csv));
+    let frame = ds.materialize(&|_| {}).unwrap();
+    assert_eq!(frame.columns[0].sql_type, "DOUBLE");
+    match ds.distribution(&frame, &frame.columns[0], 10, 5).unwrap() {
+        Distribution::Histogram(bins) => {
+            assert_eq!(bins.iter().map(|b| b.count).sum::<u64>(), 20);
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(matches!(
+        ds.sketches(&frame).unwrap()[0],
+        Distribution::Histogram(_)
+    ));
+}
+
+#[test]
 fn sql_queries() {
     let s = Scratch::new();
     let (ds, _) = numbers(&s);
