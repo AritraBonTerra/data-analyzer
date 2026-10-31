@@ -180,6 +180,8 @@ pub struct Document {
     table: Entity<TableState<GridDelegate>>,
     search: Entity<InputState>,
     search_task: Task<()>,
+    /// Set by [`Document::reset_spec`]; the next render empties the search field.
+    clear_search_input: bool,
     /// The "Go to row" field in the status bar.
     goto: Entity<InputState>,
     goto_open: bool,
@@ -251,6 +253,7 @@ impl Document {
             table,
             search,
             search_task: Task::ready(()),
+            clear_search_input: false,
             goto,
             goto_open: false,
             filter_editor,
@@ -281,7 +284,7 @@ impl Document {
         self.view = None;
         self.query_frame = None;
         self.source = Source::File;
-        self.spec = ViewSpec::default();
+        self.reset_spec();
         self.profile = None;
         self.load = Load::Done;
         self.selected_column = None;
@@ -692,6 +695,14 @@ impl Document {
         }
     }
 
+    /// Drops sort, filters and search, including a search still being typed, so
+    /// the toolbar matches the grid. Callers re-show or re-apply the view.
+    fn reset_spec(&mut self) {
+        self.spec = ViewSpec::default();
+        self.search_task = Task::ready(());
+        self.clear_search_input = true;
+    }
+
     fn clear_filters(&mut self, _: &ClearFilters, window: &mut Window, cx: &mut Context<Self>) {
         self.spec = ViewSpec::default();
         self.search.update(cx, |s, cx| s.set_value("", window, cx));
@@ -935,7 +946,7 @@ impl Document {
                         this.apply_generation += 1;
                         let rows = frame.rows.unwrap_or(0);
                         this.source = Source::Query;
-                        this.spec = ViewSpec::default();
+                        this.reset_spec();
                         this.query_frame = Some(frame.clone());
                         this.selected_column = None;
                         this.show_frame(frame, cx);
@@ -960,7 +971,7 @@ impl Document {
             return;
         }
         self.source = Source::File;
-        self.spec = ViewSpec::default();
+        self.reset_spec();
         self.selected_column = None;
         self.busy = Busy::Idle;
         self.apply_generation += 1;
@@ -1055,7 +1066,8 @@ impl Document {
             let format = match path.extension().and_then(|e| e.to_str()) {
                 Some("parquet" | "pq") => ExportFormat::Parquet,
                 Some("json" | "jsonl" | "ndjson") => ExportFormat::Json,
-                Some("csv" | "tsv" | "txt") => ExportFormat::Csv,
+                Some("tsv" | "tab") => ExportFormat::Tsv,
+                Some("csv" | "txt") => ExportFormat::Csv,
                 _ => format,
             };
             let _ = this.update(cx, |this, cx| {
@@ -1659,6 +1671,9 @@ impl Render for Document {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Errors raised from background work are shown as toasts here, where
         // the window is available.
+        if std::mem::take(&mut self.clear_search_input) {
+            self.search.update(cx, |s, cx| s.set_value("", window, cx));
+        }
         for message in std::mem::take(&mut self.pending_errors) {
             window.push_notification(Notification::error(message), cx);
         }

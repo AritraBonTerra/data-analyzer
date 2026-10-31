@@ -114,6 +114,7 @@ pub enum SqlOutcome {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExportFormat {
     Csv,
+    Tsv,
     Parquet,
     /// Newline-delimited JSON.
     Json,
@@ -123,6 +124,7 @@ impl ExportFormat {
     pub fn extension(self) -> &'static str {
         match self {
             Self::Csv => "csv",
+            Self::Tsv => "tsv",
             Self::Parquet => "parquet",
             Self::Json => "jsonl",
         }
@@ -546,6 +548,7 @@ impl Dataset {
     pub fn export(&self, frame: &Frame, path: &Path, format: ExportFormat) -> Result<()> {
         let options = match format {
             ExportFormat::Csv => "FORMAT csv, HEADER true",
+            ExportFormat::Tsv => "FORMAT csv, HEADER true, DELIMITER '\t'",
             ExportFormat::Parquet => "FORMAT parquet, COMPRESSION zstd",
             ExportFormat::Json => "FORMAT json",
         };

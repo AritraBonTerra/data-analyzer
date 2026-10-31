@@ -446,6 +446,20 @@ fn cancelled_query_returns_promptly() {
 }
 
 #[test]
+fn tsv_export_round_trips() {
+    let s = Scratch::new();
+    let (ds, frame) = numbers(&s);
+    let out = s.0.join("out.tsv");
+    ds.export(&frame, &out, ExportFormat::Tsv).unwrap();
+    let text = std::fs::read_to_string(&out).unwrap();
+    assert!(text.starts_with("n\tlabel\tday\n"), "{text}");
+    let back = s.open(&out);
+    let back_frame = back.materialize(&|_| {}).unwrap();
+    assert_eq!(names(&back_frame), ["n", "label", "day"]);
+    assert_eq!(back_frame.rows, frame.rows);
+}
+
+#[test]
 fn exports_filtered_view() {
     let s = Scratch::new();
     let (ds, base) = numbers(&s);
