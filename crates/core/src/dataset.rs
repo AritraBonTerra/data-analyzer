@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -59,6 +58,8 @@ impl Column {
 
 /// A queryable set of rows: the file itself, a sorted/filtered copy of it, or a
 /// SQL result. Cheap to clone; the UI keeps one per grid and pages through it.
+/// Sorted, filtered and SQL frames own a scratch table that is dropped when the
+/// last clone goes away, so a frame stays readable for as long as you hold it.
 #[derive(Clone, Debug)]
 pub struct Frame {
     /// Unique per dataset, so the UI can drop pages that belong to an old frame.
@@ -67,6 +68,27 @@ pub struct Frame {
     pub columns: Arc<[Column]>,
     /// `None` while a CSV/JSON file is still loading and the total is unknown.
     pub rows: Option<u64>,
+    _table: Option<Arc<ScratchTable>>,
+}
+
+/// Drops its table when the last [`Frame`] using it is dropped.
+struct ScratchTable {
+    name: String,
+    conn: Mutex<Connection>,
+}
+
+impl Drop for ScratchTable {
+    fn drop(&mut self) {
+        if let Ok(conn) = self.conn.get_mut() {
+            let _ = conn.execute_batch(&format!("DROP TABLE IF EXISTS {}", self.name));
+        }
+    }
+}
+
+impl std::fmt::Debug for ScratchTable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.name)
+    }
 }
 
 /// A window of rows rendered as text. `None` is SQL NULL.
@@ -147,9 +169,6 @@ pub struct Dataset {
     load_interrupt: Mutex<Option<Arc<InterruptHandle>>>,
     view_interrupt: Mutex<Option<Arc<InterruptHandle>>>,
     query_interrupt: Mutex<Option<Arc<InterruptHandle>>>,
-    /// Latest sorted/filtered table per base relation; replaced tables are dropped.
-    derived: Mutex<HashMap<String, String>>,
-    last_query: Mutex<Option<String>>,
     notice: Mutex<Option<String>>,
 }
 
@@ -193,8 +212,6 @@ impl Dataset {
             load_interrupt: Mutex::new(None),
             view_interrupt: Mutex::new(None),
             query_interrupt: Mutex::new(None),
-            derived: Mutex::new(HashMap::new()),
-            last_query: Mutex::new(None),
             notice: Mutex::new(None),
         };
         dataset.attach()?;
@@ -338,7 +355,7 @@ impl Dataset {
     pub fn frame(&self) -> Result<Frame> {
         let conn = self.connection()?;
         let rows = if self.is_loaded() {
-            Some(conn.query_row("SELECT count(*) FROM data", [], |r| r.get::<_, i64>(0))? as u64)
+            Some(count(&conn, "data")?)
         } else {
             None
         };
@@ -347,6 +364,7 @@ impl Dataset {
             relation: "data".into(),
             columns: describe(&conn, "data")?.into(),
             rows,
+            _table: None,
         })
     }
 
@@ -455,37 +473,21 @@ impl Dataset {
             base.relation,
             spec.clauses(&base.columns)
         ));
-        let superseded = || {
-            !self
-                .view_interrupt
-                .lock()
-                .unwrap()
-                .as_ref()
-                .is_some_and(|current| Arc::ptr_eq(current, &handle))
-        };
         if let Err(err) = created {
-            return Err(if superseded() {
-                Cancelled.into()
-            } else {
+            return Err(if is_current(&self.view_interrupt, &handle) {
                 err.into()
+            } else {
+                Cancelled.into()
             });
         }
-        let rows = conn.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| {
-            r.get::<_, i64>(0)
-        })? as u64;
-        if let Some(old) = self
-            .derived
-            .lock()
-            .unwrap()
-            .insert(base.relation.clone(), table.clone())
-        {
-            conn.execute_batch(&format!("DROP TABLE IF EXISTS {old}"))?;
-        }
+        let owner = scratch_table(&conn, &table)?;
+        let rows = count(&conn, &table)?;
         Ok(Frame {
             id,
             relation: table,
             columns: base.columns.clone(),
             rows: Some(rows),
+            _table: Some(owner),
         })
     }
 
@@ -504,34 +506,32 @@ impl Dataset {
         let table = format!("_query_{}", self.next_id());
         let as_table =
             conn.execute_batch(&format!("CREATE TABLE {table} AS SELECT * FROM ({sql})"));
-        let outcome = match as_table {
+        let cancelled = || !is_current(&self.query_interrupt, &handle);
+        match as_table {
             Ok(()) => {
-                if let Some(old) = self.last_query.lock().unwrap().replace(table.clone()) {
-                    conn.execute_batch(&format!("DROP TABLE IF EXISTS {old}"))?;
-                }
-                let rows = conn.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| {
-                    r.get::<_, i64>(0)
-                })? as u64;
-                SqlOutcome::Rows(Frame {
+                let owner = scratch_table(&conn, &table)?;
+                Ok(SqlOutcome::Rows(Frame {
                     id: self.next_id(),
                     columns: describe(&conn, &table)?.into(),
+                    rows: Some(count(&conn, &table)?),
                     relation: table,
-                    rows: Some(rows),
-                })
+                    _table: Some(owner),
+                }))
             }
+            Err(_) if cancelled() => Err(Cancelled.into()),
             // Not a SELECT (or a syntax error): run it as written so the user
             // sees DuckDB's own error for what they typed.
-            Err(_) => {
-                conn.execute_batch(sql)?;
-                SqlOutcome::Done
-            }
-        };
-        Ok(outcome)
+            Err(_) => match conn.execute_batch(sql) {
+                Ok(()) => Ok(SqlOutcome::Done),
+                Err(_) if cancelled() => Err(Cancelled.into()),
+                Err(err) => Err(err.into()),
+            },
+        }
     }
 
-    /// Stops a running [`Dataset::query`].
+    /// Stops a running [`Dataset::query`]; it returns [`Cancelled`].
     pub fn cancel_query(&self) {
-        if let Some(handle) = self.query_interrupt.lock().unwrap().as_ref() {
+        if let Some(handle) = self.query_interrupt.lock().unwrap().take() {
             handle.interrupt();
         }
     }
@@ -603,6 +603,29 @@ fn remove_sessions(cache_dir: &Path, should_remove: impl Fn(i32) -> bool) {
 fn process_alive(pid: i32) -> bool {
     // Signal 0 checks existence without sending anything. EPERM means it exists.
     unsafe { libc::kill(pid, 0) == 0 || *libc::__error() == libc::EPERM }
+}
+
+/// Whether `handle` still belongs to the latest call. Newer calls replace it,
+/// and cancelling removes it.
+fn is_current(slot: &Mutex<Option<Arc<InterruptHandle>>>, handle: &Arc<InterruptHandle>) -> bool {
+    slot.lock()
+        .unwrap()
+        .as_ref()
+        .is_some_and(|current| Arc::ptr_eq(current, handle))
+}
+
+fn scratch_table(conn: &Connection, name: &str) -> Result<Arc<ScratchTable>> {
+    Ok(Arc::new(ScratchTable {
+        name: name.to_string(),
+        conn: Mutex::new(conn.try_clone()?),
+    }))
+}
+
+fn count(conn: &Connection, relation: &str) -> Result<u64> {
+    let n: i64 = conn.query_row(&format!("SELECT count(*) FROM {relation}"), [], |r| {
+        r.get(0)
+    })?;
+    Ok(n as u64)
 }
 
 fn is_float(sql_type: &str) -> bool {

@@ -389,6 +389,58 @@ fn sql_queries() {
 }
 
 #[test]
+fn frames_stay_readable_while_held() {
+    let s = Scratch::new();
+    let (ds, base) = numbers(&s);
+    let filter = |n: &str| ViewSpec {
+        filters: vec![Filter {
+            column: "n".into(),
+            op: FilterOp::LessThan(n.into()),
+        }],
+        ..Default::default()
+    };
+    let scratch_tables = |ds: &Dataset| {
+        let SqlOutcome::Rows(frame) = ds
+            .query("SELECT table_name FROM duckdb_tables() WHERE table_name LIKE '\\_view\\_%' ESCAPE '\\'")
+            .unwrap()
+        else {
+            panic!("expected rows");
+        };
+        frame.rows.unwrap()
+    };
+
+    let first = ds.apply(&base, &filter("5")).unwrap();
+    let second = ds.apply(&base, &filter("3")).unwrap();
+    // A newer view doesn't invalidate one the UI (or an export) still holds.
+    assert_eq!(ds.fetch(&first, 0, 10).unwrap().rows.len(), 5);
+    assert_eq!(ds.fetch(&second, 0, 10).unwrap().rows.len(), 3);
+    assert_eq!(scratch_tables(&ds), 2);
+    drop(first);
+    drop(second);
+    assert_eq!(scratch_tables(&ds), 0);
+}
+
+#[test]
+fn cancelled_query_returns_promptly() {
+    let s = Scratch::new();
+    let (ds, _) = numbers(&s);
+    let ds = std::sync::Arc::new(ds);
+    let worker = {
+        let ds = ds.clone();
+        std::thread::spawn(move || {
+            let started = std::time::Instant::now();
+            let result = ds.query("SELECT sum(i * i % 7) FROM range(20000000000) t(i)");
+            (result, started.elapsed())
+        })
+    };
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    ds.cancel_query();
+    let (result, elapsed) = worker.join().unwrap();
+    assert!(result.unwrap_err().is::<Cancelled>());
+    assert!(elapsed < std::time::Duration::from_secs(5), "{elapsed:?}");
+}
+
+#[test]
 fn exports_filtered_view() {
     let s = Scratch::new();
     let (ds, base) = numbers(&s);

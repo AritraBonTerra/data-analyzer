@@ -194,7 +194,7 @@ fn categories(conn: &Connection, relation: &str, col: &str, top: usize) -> Resul
         return Ok(Distribution::Empty);
     }
     let mut stmt = conn.prepare(&format!(
-        "SELECT left(CAST({col} AS VARCHAR), 200) AS v, count(*) AS n FROM {relation}
+        "SELECT CAST({col} AS VARCHAR) AS v, count(*) AS n FROM {relation}
          GROUP BY v ORDER BY n DESC, v NULLS LAST LIMIT {top}"
     ))?;
     let values = stmt

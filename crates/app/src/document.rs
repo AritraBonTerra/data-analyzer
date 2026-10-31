@@ -279,6 +279,9 @@ impl Document {
         self.load = Load::Done;
         self.selected_column = None;
         self.sheet = sheet;
+        self.busy = Busy::Idle;
+        // Results from the old dataset's filters or queries must not land here.
+        self.apply_generation += 1;
         self.open_generation += 1;
         let generation = self.open_generation;
         self.table.update(cx, |table, cx| {
@@ -366,11 +369,14 @@ impl Document {
                         this.load = Load::Done;
                         this.notice = this.dataset.as_ref().and_then(|d| d.notice());
                         this.base = Some(frame.clone());
-                        if this.spec.is_empty() {
-                            this.show_frame(frame, cx);
-                            this.profile_view(cx);
-                        } else {
-                            this.apply(Busy::Filtering, cx);
+                        // A SQL result on screen stays; "Back to file" shows the loaded file.
+                        if this.source == Source::File {
+                            if this.spec.is_empty() {
+                                this.show_frame(frame, cx);
+                                this.profile_view(cx);
+                            } else {
+                                this.apply(Busy::Filtering, cx);
+                            }
                         }
                     }
                     Err(err) if err.is::<Cancelled>() => this.load = Load::Cancelled,
@@ -925,6 +931,7 @@ impl Document {
                         QueryStatus::Rows(rows)
                     }
                     Ok(SqlOutcome::Done) => QueryStatus::Done,
+                    Err(err) if err.is::<Cancelled>() => QueryStatus::Idle,
                     Err(err) => QueryStatus::Error(format!("{err:#}")),
                 };
                 this.sql
@@ -943,6 +950,8 @@ impl Document {
         self.source = Source::File;
         self.spec = ViewSpec::default();
         self.selected_column = None;
+        self.busy = Busy::Idle;
+        self.apply_generation += 1;
         if let Some(base) = self.base.clone() {
             self.show_frame(base, cx);
             self.profile_view(cx);
