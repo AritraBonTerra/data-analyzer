@@ -131,6 +131,10 @@ impl ExportFormat {
     }
 }
 
+/// Orders SQL requests; see [`Dataset::query_ticket`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct QueryTicket(u64);
+
 /// Returned (inside `anyhow::Error`) when work was cancelled or superseded.
 /// Check with `err.is::<Cancelled>()` and ignore it.
 #[derive(Debug)]
@@ -176,6 +180,8 @@ pub struct Dataset {
     load_interrupt: Mutex<Option<Arc<InterruptHandle>>>,
     view_interrupt: Mutex<Option<Arc<InterruptHandle>>>,
     query_interrupt: Mutex<Option<Arc<InterruptHandle>>>,
+    /// The most recently issued [`QueryTicket`]; older tickets are stale.
+    latest_query: AtomicU64,
     notice: Mutex<Option<String>>,
 }
 
@@ -218,6 +224,7 @@ impl Dataset {
             load_interrupt: Mutex::new(None),
             view_interrupt: Mutex::new(None),
             query_interrupt: Mutex::new(None),
+            latest_query: AtomicU64::new(0),
             notice: Mutex::new(None),
         };
         dataset.attach()?;
@@ -502,14 +509,34 @@ impl Dataset {
     /// Runs SQL where the file is the view `data`. Queries that return rows
     /// become a frame you can page, sort and profile like the file itself.
     pub fn query(&self, sql: &str) -> Result<SqlOutcome> {
+        self.query_with(self.query_ticket(), sql)
+    }
+
+    /// Claims the next query slot. Take it when the user presses Run (on the UI
+    /// thread), then pass it to [`Dataset::query_with`] on a worker, so request
+    /// order is fixed before any worker runs.
+    pub fn query_ticket(&self) -> QueryTicket {
+        QueryTicket(self.latest_query.fetch_add(1, Ordering::AcqRel) + 1)
+    }
+
+    /// Like [`Dataset::query`], but returns [`Cancelled`] without running if a
+    /// newer ticket was issued or the query was cancelled first. A stale request
+    /// never interrupts a newer one, so nothing needs to be retried.
+    pub fn query_with(&self, ticket: QueryTicket, sql: &str) -> Result<SqlOutcome> {
         let sql = sql.trim().trim_end_matches(';').trim();
         if sql.is_empty() {
             bail!("type a query first");
         }
         let conn = self.connection()?;
         let handle = conn.interrupt_handle();
-        if let Some(previous) = self.query_interrupt.lock().unwrap().replace(handle.clone()) {
-            previous.interrupt();
+        {
+            let mut slot = self.query_interrupt.lock().unwrap();
+            if self.latest_query.load(Ordering::Acquire) != ticket.0 {
+                return Err(Cancelled.into());
+            }
+            if let Some(previous) = slot.replace(handle.clone()) {
+                previous.interrupt();
+            }
         }
         let table = format!("_query_{}", self.next_id());
         let as_table =
@@ -539,7 +566,10 @@ impl Dataset {
 
     /// Stops a running [`Dataset::query`]; it returns [`Cancelled`].
     pub fn cancel_query(&self) {
-        if let Some(handle) = self.query_interrupt.lock().unwrap().take() {
+        let mut slot = self.query_interrupt.lock().unwrap();
+        // Also void tickets whose workers haven't started yet.
+        self.latest_query.fetch_add(1, Ordering::AcqRel);
+        if let Some(handle) = slot.take() {
             handle.interrupt();
         }
     }

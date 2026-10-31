@@ -499,6 +499,35 @@ fn tsv_export_round_trips() {
 }
 
 #[test]
+fn stale_query_tickets_never_run() {
+    let s = Scratch::new();
+    let (ds, _) = numbers(&s);
+    let older = ds.query_ticket();
+    let newer = ds.query_ticket();
+    // The older request's worker starts late: it must give up, not interrupt.
+    let stale = ds.query_with(older, "CREATE TABLE side_effect AS SELECT 1 AS x");
+    assert!(stale.unwrap_err().is::<Cancelled>());
+    assert!(matches!(
+        ds.query_with(newer, "SELECT 1 AS x").unwrap(),
+        SqlOutcome::Rows(_)
+    ));
+    let tables = ds.query("SELECT * FROM duckdb_tables() WHERE table_name = 'side_effect'");
+    let SqlOutcome::Rows(frame) = tables.unwrap() else {
+        panic!()
+    };
+    assert_eq!(frame.rows, Some(0));
+
+    // Cancel voids a ticket whose worker hasn't started.
+    let pending = ds.query_ticket();
+    ds.cancel_query();
+    assert!(
+        ds.query_with(pending, "SELECT 1")
+            .unwrap_err()
+            .is::<Cancelled>()
+    );
+}
+
+#[test]
 fn exports_filtered_view() {
     let s = Scratch::new();
     let (ds, base) = numbers(&s);
