@@ -417,6 +417,11 @@ fn frames_stay_readable_while_held() {
     assert_eq!(scratch_tables(&ds), 2);
     drop(first);
     drop(second);
+    // Tables are dropped on a background thread.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while scratch_tables(&ds) > 0 && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
     assert_eq!(scratch_tables(&ds), 0);
 }
 

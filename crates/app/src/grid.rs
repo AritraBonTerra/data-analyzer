@@ -94,6 +94,13 @@ impl GridDelegate {
             .frame
             .as_ref()
             .is_some_and(|old| old.columns == frame.columns);
+        // Filters only remove rows, so the same count means the same rows (a
+        // re-sort) and the header stats still hold. Otherwise they're stale.
+        let same_rows = same_columns
+            && self
+                .frame
+                .as_ref()
+                .is_some_and(|old| old.rows == frame.rows);
         self.rows = frame.rows.unwrap_or(PREVIEW_ROWS);
         self.epoch += 1;
         self.sized = false;
@@ -103,7 +110,7 @@ impl GridDelegate {
         } else {
             Vec::new()
         };
-        if !same_columns {
+        if !same_rows {
             self.profiles = vec![None; frame.columns.len()];
         }
         self.gutter_width = format::gutter_width(self.rows);

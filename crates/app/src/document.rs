@@ -571,7 +571,8 @@ impl Document {
                         this.show_frame(frame, cx);
                         this.profile_view(cx);
                     }
-                    Err(err) if err.is::<Cancelled>() => {}
+                    // Only an older worker racing ahead can cancel the newest request.
+                    Err(err) if err.is::<Cancelled>() => this.apply(busy, cx),
                     Err(err) => this.notify_error(format!("{err:#}"), cx),
                 }
                 cx.notify();

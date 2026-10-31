@@ -104,13 +104,13 @@ impl Op {
         }
     }
 
+    /// Values keep their spaces so text filters match exactly; the engine trims
+    /// values it casts to numbers or dates.
     fn to_filter(self, a: &str, b: &str) -> Option<FilterOp> {
-        let a = a.trim();
-        let b = b.trim();
         Some(match self {
             Op::IsNull => FilterOp::IsNull,
             Op::IsNotNull => FilterOp::IsNotNull,
-            _ if a.is_empty() => return None,
+            _ if a.trim().is_empty() => return None,
             Op::Contains => FilterOp::Contains(a.into()),
             Op::NotContains => FilterOp::NotContains(a.into()),
             Op::Equals => FilterOp::Equals(a.into()),
@@ -118,7 +118,7 @@ impl Op {
             Op::GreaterThan => FilterOp::GreaterThan(a.into()),
             Op::LessThan => FilterOp::LessThan(a.into()),
             Op::Between => {
-                if b.is_empty() {
+                if b.trim().is_empty() {
                     return None;
                 }
                 FilterOp::Between(a.into(), b.into())

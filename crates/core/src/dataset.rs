@@ -78,9 +78,15 @@ struct ScratchTable {
 }
 
 impl Drop for ScratchTable {
+    /// Runs on a short-lived thread: the last frame is often dropped on the UI thread.
     fn drop(&mut self) {
-        if let Ok(conn) = self.conn.get_mut() {
-            let _ = conn.execute_batch(&format!("DROP TABLE IF EXISTS {}", self.name));
+        let sql = format!("DROP TABLE IF EXISTS {}", self.name);
+        if let Ok(conn) = self.conn.get_mut().map(|conn| conn.try_clone()) {
+            std::thread::spawn(move || {
+                if let Ok(conn) = conn {
+                    let _ = conn.execute_batch(&sql);
+                }
+            });
         }
     }
 }
