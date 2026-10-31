@@ -171,8 +171,17 @@ impl StatsPanel {
                 Some(format!("≈ {}", group_digits(summary.distinct))),
                 cx,
             ),
-            Self::fact("Min", summary.min.as_deref().map(tidy_number), cx),
-            Self::fact("Max", summary.max.as_deref().map(tidy_number), cx),
+            // Text extremes are shown as-is: "001.00" is a value, not a number.
+            Self::fact(
+                "Min",
+                summary.min.as_deref().map(|v| tidy_if(numeric, v)),
+                cx,
+            ),
+            Self::fact(
+                "Max",
+                summary.max.as_deref().map(|v| tidy_if(numeric, v)),
+                cx,
+            ),
             if numeric {
                 Self::fact("Mean", summary.mean.clone(), cx)
             } else {
@@ -570,5 +579,13 @@ impl Render for StatsPanel {
                     .child(close),
             )
             .child(body)
+    }
+}
+
+fn tidy_if(numeric: bool, value: &str) -> String {
+    if numeric {
+        tidy_number(value)
+    } else {
+        value.to_string()
     }
 }
