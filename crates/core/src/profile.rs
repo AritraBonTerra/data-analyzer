@@ -166,7 +166,7 @@ fn distribution(
         let (Some(lo), Some(hi)) = (lo, hi) else {
             return Ok(Distribution::Empty);
         };
-        if distinct as u64 > FEW_DISTINCT && hi > lo {
+        if distinct as u64 > FEW_DISTINCT && hi > lo && (hi - lo).is_finite() {
             return histogram(conn, relation, &col, &x, lo, hi, bins);
         }
     }

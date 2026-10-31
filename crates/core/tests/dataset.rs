@@ -401,6 +401,21 @@ fn histograms_skip_infinite_values() {
 }
 
 #[test]
+fn huge_ranges_fall_back_to_top_values() {
+    let s = Scratch::new();
+    let mut csv = String::from("x\n-1e308\n1e308\n");
+    for i in 0..20 {
+        csv.push_str(&format!("{i}.5\n"));
+    }
+    let ds = s.open(&s.write("huge.csv", &csv));
+    let frame = ds.materialize(&|_| {}).unwrap();
+    assert!(matches!(
+        ds.distribution(&frame, &frame.columns[0], 10, 5).unwrap(),
+        Distribution::Categories { .. }
+    ));
+}
+
+#[test]
 fn counts_sparse_nulls_exactly() {
     let s = Scratch::new();
     let mut csv = String::from("x\n");
