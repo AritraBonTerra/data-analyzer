@@ -162,6 +162,9 @@ pub struct Document {
     sheet: usize,
     busy: Busy,
     apply_generation: u64,
+    /// Separate from `apply_generation`, so sorting or filtering while SQL runs
+    /// doesn't drop the query's result and leave its panel stuck on "Running".
+    query_generation: u64,
     open_generation: u64,
     profile: Option<Profile>,
     selected_column: Option<usize>,
@@ -236,6 +239,7 @@ impl Document {
             sheet: 0,
             busy: Busy::Idle,
             apply_generation: 0,
+            query_generation: 0,
             open_generation: 0,
             profile: None,
             selected_column: None,
@@ -285,6 +289,7 @@ impl Document {
         self.busy = Busy::Idle;
         // Results from the old dataset's filters or queries must not land here.
         self.apply_generation += 1;
+        self.query_generation += 1;
         self.open_generation += 1;
         let generation = self.open_generation;
         self.table.update(cx, |table, cx| {
@@ -912,19 +917,21 @@ impl Document {
         self.sql
             .update(cx, |panel, cx| panel.set_status(QueryStatus::Running, cx));
         self.busy = Busy::Querying;
-        self.apply_generation += 1;
-        let generation = self.apply_generation;
+        self.query_generation += 1;
+        let generation = self.query_generation;
         cx.spawn(async move |this, cx| {
             let outcome = cx
                 .background_spawn(async move { dataset.query(&sql) })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                if this.apply_generation != generation {
+                if this.query_generation != generation {
                     return;
                 }
                 this.busy = Busy::Idle;
                 let status = match outcome {
                     Ok(SqlOutcome::Rows(frame)) => {
+                        // The result replaces the grid, so pending sorts/filters are stale.
+                        this.apply_generation += 1;
                         let rows = frame.rows.unwrap_or(0);
                         this.source = Source::Query;
                         this.spec = ViewSpec::default();
@@ -956,6 +963,11 @@ impl Document {
         self.selected_column = None;
         self.busy = Busy::Idle;
         self.apply_generation += 1;
+        // Going back to the file abandons a query that is still running.
+        self.query_generation += 1;
+        if let Some(dataset) = &self.dataset {
+            dataset.cancel_query();
+        }
         if let Some(base) = self.base.clone() {
             self.show_frame(base, cx);
             self.profile_view(cx);

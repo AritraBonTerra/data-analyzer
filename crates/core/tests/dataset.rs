@@ -503,6 +503,14 @@ fn removes_own_sessions_on_quit() {
 }
 
 #[test]
+fn frame_ids_are_unique_across_datasets() {
+    let s = Scratch::new();
+    let first = s.open(&fixture("fruit.xlsx")).frame().unwrap();
+    let second = s.open(&fixture("fruit.xlsx")).frame().unwrap();
+    assert_ne!(first.id, second.id);
+}
+
+#[test]
 fn rejects_unknown_files() {
     let s = Scratch::new();
     let path = s.write("x.png", "nope");

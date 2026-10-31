@@ -62,7 +62,7 @@ impl Column {
 /// last clone goes away, so a frame stays readable for as long as you hold it.
 #[derive(Clone, Debug)]
 pub struct Frame {
-    /// Unique per dataset, so the UI can drop pages that belong to an old frame.
+    /// Unique within the process, so the UI can drop results for an old frame.
     pub id: u64,
     pub(crate) relation: String,
     pub columns: Arc<[Column]>,
@@ -161,7 +161,6 @@ pub struct Dataset {
     sheet: usize,
     session_dir: PathBuf,
     root: Mutex<Option<Connection>>,
-    next_id: AtomicU64,
     loaded: AtomicBool,
     /// Reader fallback level that last worked for CSV/JSON.
     level: Mutex<u8>,
@@ -205,7 +204,6 @@ impl Dataset {
             sheet: options.sheet,
             session_dir,
             root: Mutex::new(Some(conn)),
-            next_id: AtomicU64::new(1),
             loaded: AtomicBool::new(!kind.needs_materialize()),
             level: Mutex::new(0),
             load_cancelled: AtomicBool::new(false),
@@ -321,8 +319,10 @@ impl Dataset {
         Ok(root.try_clone()?)
     }
 
+    /// Ids are unique across all datasets in the process, so a frame from a
+    /// previous sheet or file can never be mistaken for a current one.
     pub(crate) fn next_id(&self) -> u64 {
-        self.next_id.fetch_add(1, Ordering::Relaxed)
+        NEXT_ID.fetch_add(1, Ordering::Relaxed)
     }
 
     pub fn path(&self) -> &Path {
@@ -565,6 +565,7 @@ impl Drop for Dataset {
 }
 
 static SESSION_COUNTER: AtomicU64 = AtomicU64::new(0);
+static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Deletes scratch databases left by earlier runs that exited without cleaning
 /// up. Only removes `session-<pid>-*` folders whose process is gone.
