@@ -120,13 +120,22 @@ fn csv_with_late_type_change_falls_back_instead_of_failing() {
 #[test]
 fn floats_print_compactly() {
     let s = Scratch::new();
-    let path = s.write("f.csv", "x\n0.0000581092822151589\n501.00073403878823\n0.1\n1e20\n\n");
+    let path = s.write(
+        "f.csv",
+        "x\n0.0000581092822151589\n501.00073403878823\n0.1\n1e20\n\n",
+    );
     let ds = s.open(&path);
     let frame = ds.materialize(&|_| {}).unwrap();
     assert_eq!(frame.columns[0].sql_type, "DOUBLE");
     assert_eq!(
         cells(&ds.fetch(&frame, 0, 10).unwrap()),
-        [["5.81092822152e-05"], ["501.000734039"], ["0.1"], ["1e+20"], ["∅"]]
+        [
+            ["5.81092822152e-05"],
+            ["501.000734039"],
+            ["0.1"],
+            ["1e+20"],
+            ["∅"]
+        ]
     );
 }
 

@@ -6,7 +6,8 @@
 #   scripts/bundle.sh --notarize    # build + sign + notarize + staple
 #
 # Env:
-#   SIGN_IDENTITY   codesign identity (default: first "Developer ID Application")
+#   SIGN_IDENTITY   codesign identity (default: first "Developer ID Application");
+#                   "-" signs ad hoc for local testing (no notarization possible)
 #   NOTARY_PROFILE  notarytool keychain profile (default: data-analyzer). Create once:
 #                   xcrun notarytool store-credentials data-analyzer \
 #                     --apple-id you@example.com --team-id TEAMID --password <app-specific>
@@ -29,6 +30,10 @@ if [[ -z "$identity" ]]; then
   echo "No Developer ID Application identity found; set SIGN_IDENTITY." >&2
   exit 1
 fi
+
+# Apple's timestamp server only applies to real identities.
+timestamp=--timestamp
+[[ "$identity" == "-" ]] && timestamp=--timestamp=none
 
 echo "==> Building release binary"
 cargo build --release -p data-analyzer
@@ -54,7 +59,7 @@ iconutil -c icns "$iconset" -o "$app/Contents/Resources/AppIcon.icns"
 rm -rf "$work"
 
 echo "==> Signing with $identity"
-codesign --force --options runtime --timestamp --sign "$identity" "$app"
+codesign --force --options runtime "$timestamp" --sign "$identity" "$app"
 codesign --verify --strict --verbose=2 "$app"
 
 notarize_and_staple() {
@@ -80,7 +85,7 @@ cp -R "$app" "$staging/"
 ln -s /Applications "$staging/Applications"
 hdiutil create -quiet -volname "Data Analyzer" -srcfolder "$staging" -ov -format UDZO "$dmg"
 rm -rf "$staging"
-codesign --force --timestamp --sign "$identity" "$dmg"
+codesign --force "$timestamp" --sign "$identity" "$dmg"
 
 if $notarize; then
   echo "==> Notarizing DMG"
