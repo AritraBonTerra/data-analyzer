@@ -268,7 +268,10 @@ impl Document {
     fn open_sheet(&mut self, sheet: usize, cx: &mut Context<Self>) {
         if let Some(old) = self.dataset.take() {
             old.cancel_load();
+            old.cancel_query();
         }
+        self.sql
+            .update(cx, |panel, cx| panel.set_status(QueryStatus::Idle, cx));
         self.state = DocState::Opening;
         self.base = None;
         self.view = None;
@@ -369,14 +372,15 @@ impl Document {
                         this.load = Load::Done;
                         this.notice = this.dataset.as_ref().and_then(|d| d.notice());
                         this.base = Some(frame.clone());
-                        // A SQL result on screen stays; "Back to file" shows the loaded file.
-                        if this.source == Source::File {
-                            if this.spec.is_empty() {
-                                this.show_frame(frame, cx);
-                                this.profile_view(cx);
-                            } else {
-                                this.apply(Busy::Filtering, cx);
-                            }
+                        // A SQL result on screen stays ("Back to file" shows the loaded
+                        // file); it just gets the stats it couldn't compute while loading.
+                        if this.source == Source::Query {
+                            this.profile_view(cx);
+                        } else if this.spec.is_empty() {
+                            this.show_frame(frame, cx);
+                            this.profile_view(cx);
+                        } else {
+                            this.apply(Busy::Filtering, cx);
                         }
                     }
                     Err(err) if err.is::<Cancelled>() => this.load = Load::Cancelled,
