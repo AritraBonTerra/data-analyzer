@@ -1,0 +1,14 @@
+[package]
+name = "data-analyzer"
+version = "0.1.0"
+edition = "2024"
+description = "A fast, native viewer for CSV, Excel, Parquet and JSON files."
+
+[[bin]]
+name = "data-analyzer"
+path = "src/main.rs"
+
+[dependencies]
+da-core = { path = "../core" }
+gpui-kit = "=0.8.1"
+anyhow = "1"
