@@ -121,7 +121,7 @@ fn main() {
                 let _ = window.update(cx, |_, window, cx| {
                     let note = match result {
                         Ok(()) => gpui_kit::component::notification::Notification::success(
-                            "Data Analyzer is now the default app for data files.",
+                            "Requested. macOS will ask you to confirm each file type.",
                         ),
                         Err(err) => {
                             gpui_kit::component::notification::Notification::info(err.to_string())

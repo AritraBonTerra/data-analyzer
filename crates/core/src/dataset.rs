@@ -410,10 +410,14 @@ impl Dataset {
             .columns
             .iter()
             .map(|c| {
-                format!(
-                    "left(CAST({} AS VARCHAR), {MAX_CELL_CHARS})",
-                    quote_ident(&c.name)
-                )
+                let col = quote_ident(&c.name);
+                // Floats print with 12 significant digits: full round-trip text is
+                // long, and a truncated `5.8109…e-05` hides its exponent.
+                if is_float(&c.sql_type) {
+                    format!("printf('%.12g', {col})")
+                } else {
+                    format!("left(CAST({col} AS VARCHAR), {MAX_CELL_CHARS})")
+                }
             })
             .collect::<Vec<_>>()
             .join(", ");
@@ -587,6 +591,10 @@ pub fn clean_cache(cache_dir: &Path) {
 fn process_alive(pid: i32) -> bool {
     // Signal 0 checks existence without sending anything. EPERM means it exists.
     unsafe { libc::kill(pid, 0) == 0 || *libc::__error() == libc::EPERM }
+}
+
+fn is_float(sql_type: &str) -> bool {
+    matches!(sql_type, "FLOAT" | "DOUBLE" | "REAL" | "FLOAT4" | "FLOAT8")
 }
 
 fn format_reader(function: &str, path: &str, options: &[&str]) -> String {
