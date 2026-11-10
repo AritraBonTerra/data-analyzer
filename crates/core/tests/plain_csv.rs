@@ -3,6 +3,13 @@
 //! DuckDB's `read_csv` on the same file with the fallback levels the app used
 //! before (the old path). Both must give the same columns, types and cells,
 //! and the import must have nothing to say about the file.
+//!
+//! The one change on purpose is the cleaner's: a text column whose values
+//! are all numbers once placeholders like `N/A` are left out now reads as
+//! numbers, and dates and date-times not written year first are read by the
+//! cleaner, not DuckDB.
+//! Those shapes are listed in [`CLEANED`]; the summary must say what was
+//! read, and every other column in them must still read exactly as before.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -158,6 +165,40 @@ const SHAPES: &[(&str, &str)] = &[
         "id,amount,comment\n1,10,\n2,20,\n3,30,\n",
     ),
     ("dates.csv", "date,value\n2024-01-01,5\n2024-01-02,6\n"),
+    (
+        "slash_dates.csv",
+        "date,value\n03/04/2025,5\n05/06/2025,6\n",
+    ),
+    (
+        "day_first_dates.csv",
+        "date,value\n24/03/2025,5\n05/06/2025,6\n",
+    ),
+    // Dates and times with the year first: DuckDB's, exactly as before.
+    (
+        "year_first_slash.csv",
+        "date,value\n2025/01/02,5\n2025/03/24,6\n",
+    ),
+    (
+        "iso_t_z.csv",
+        "at,v\n2025-01-05T10:00:00Z,1\n2025-01-22T10:00:00.5Z,2\n",
+    ),
+    (
+        "iso_t.csv",
+        "at,v\n2025-01-05T10:00:00,1\n2025-01-06T11:30:00,2\n",
+    ),
+    (
+        "iso_offset.csv",
+        "at,v\n2025-01-05 10:00:00+02:00,1\n2025-01-06 11:00:00-05:30,2\n",
+    ),
+    (
+        "iso_fraction.csv",
+        "at,v\n2025-01-05 10:00:00.123,1\n2025-01-06 11:00:00.5,2\n",
+    ),
+    (
+        "slash_datetimes.csv",
+        "at,v\n03/04/2025 10:30:00,1\n05/06/2025 11:00:00,2\n",
+    ),
+    ("two_digit_years.csv", "d,v\n01/05/25,1\n01/22/25,2\n"),
     ("booleans.csv", "id,active\n1,true\n2,false\n3,true\n"),
     ("decimals.csv", "item,price\na,-1.5\nb,2.25\nc,1e3\n"),
     ("numeric_names.csv", "sku,100,200\na,5,6\nb,7,8\n"),
@@ -271,6 +312,77 @@ const DIFFERS: &[(&str, &str)] = &[
     ),
 ];
 
+/// Shapes in [`SHAPES`] where the cleaner reads text columns, with the
+/// columns it reads and why. Every other column must read as before.
+const CLEANED: &[(&str, &[&str], &str)] = &[
+    (
+        "na_first.csv",
+        &["amount"],
+        "N/A is a placeholder among numbers",
+    ),
+    (
+        "dash_first.csv",
+        &["amount"],
+        "- is a placeholder among numbers",
+    ),
+    (
+        "na_middle.csv",
+        &["amount"],
+        "N/A is a placeholder among numbers",
+    ),
+    (
+        "na_row_after_blank.csv",
+        &["amount"],
+        "N/A is a placeholder among numbers",
+    ),
+    (
+        "dash_row_after_blank.csv",
+        &["amount"],
+        "- is a placeholder among numbers",
+    ),
+    (
+        "tbd_row_after_blank.csv",
+        &["amount"],
+        "TBD is a placeholder among numbers",
+    ),
+    (
+        "mostly_na_column.csv",
+        &["amount"],
+        "N/A is a placeholder among numbers",
+    ),
+    (
+        "null_words.csv",
+        &["amount"],
+        "null is a placeholder among numbers",
+    ),
+    (
+        "tbd_first_two_values.csv",
+        &["q1", "q2"],
+        "TBD is a placeholder among numbers",
+    ),
+    ("percent_column.csv", &["rate"], "12.5% is the number 0.125"),
+    (
+        "slash_dates.csv",
+        &["date"],
+        "with no day above 12 the order is a guess, month first, not DuckDB's day first",
+    ),
+    (
+        "day_first_dates.csv",
+        &["date"],
+        "the same dates, now read by the cleaner and reported",
+    ),
+    (
+        "slash_datetimes.csv",
+        &["at"],
+        "date-times follow the dates' rule: month first, a guess, not DuckDB's day first",
+    ),
+    (
+        "two_digit_years.csv",
+        &["d"],
+        "the same dates, now read by the cleaner and reported",
+    ),
+];
+
 /// The old path's levels: plain first, then tolerant
 /// of ragged rows, then all text (see `Dataset::reader`).
 const OLD_LEVELS: [&str; 3] = [
@@ -354,6 +466,28 @@ fn old_read(path: &Path) -> (Columns, Cells) {
     (columns, cells)
 }
 
+/// What is wrong with a cleaned shape's reading `new`, compared with the
+/// old one: the same columns and rows, and every column but the `converted`
+/// ones exactly as before. `None` when nothing is.
+fn cleaned_problem(
+    new: &(Columns, Cells),
+    old: &(Columns, Cells),
+    converted: &[&str],
+) -> Option<String> {
+    let names = |columns: &Columns| columns.iter().map(|c| c.0.clone()).collect::<Vec<_>>();
+    if names(&new.0) != names(&old.0) || new.1.len() != old.1.len() {
+        return Some("columns or rows differ".into());
+    }
+    for (i, (column, old_column)) in new.0.iter().zip(&old.0).enumerate() {
+        let cells = |cells: &Cells| cells.iter().map(|row| row[i].clone()).collect::<Vec<_>>();
+        let same = column == old_column && cells(&new.1) == cells(&old.1);
+        if !same && !converted.contains(&column.0.as_str()) {
+            return Some(format!("column {} changed", column.0));
+        }
+    }
+    None
+}
+
 #[test]
 fn plain_files_read_as_before() {
     let mut failures = Vec::new();
@@ -372,7 +506,14 @@ fn plain_files_read_as_before() {
         let frame = dataset.materialize(&|_| {}).unwrap();
         let new = read(&dataset, &frame);
         let old = old_read(&file);
-        if DIFFERS.iter().any(|&(differs, _)| differs == name) {
+        if let Some(&(_, converted, _)) = CLEANED.iter().find(|c| c.0 == name) {
+            if let Some(problem) = cleaned_problem(&new, &old, converted) {
+                failures.push(format!("{name}: {problem}\n  new: {new:?}\n  old: {old:?}"));
+            }
+            if !dataset.summary().is_some_and(|s| s.starts_with("Read ")) {
+                failures.push(format!("{name}: no summary of the conversion"));
+            }
+        } else if DIFFERS.iter().any(|&(differs, _)| differs == name) {
             if new == old {
                 failures.push(format!("{name} now reads as before: take it off DIFFERS"));
             }

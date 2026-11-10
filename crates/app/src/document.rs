@@ -8,9 +8,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use da_core::{
-    Cancelled, Column, ColumnSummary, Dataset, Delimiter, Distribution, ExportFormat, Filter,
-    FilterOp, Frame, ImportPlan, OpenOptions, Part, RowRole, SortKey, SqlOutcome, ViewSpec,
-    tidy_number,
+    Cancelled, Column, ColumnSummary, Conversion, Dataset, Delimiter, Distribution, Encoding,
+    ExportFormat, FileKind, Filter, FilterOp, Frame, Guessed, ImportPlan, NumberFormat,
+    OpenOptions, Part, ReadAs, RowRole, SortKey, SqlOutcome, ValueOptions, ViewSpec, tidy_number,
 };
 use futures::StreamExt;
 use gpui_kit::component::button::{Button, ButtonVariants};
@@ -27,10 +27,10 @@ use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use serde::Deserialize;
 
-use crate::filter::{FilterEditor, FilterEvent};
-use crate::format::{group_digits, percent, plural};
+use crate::filter::{FilterEditor, FilterEvent, MenuFor};
+use crate::format::{formatted, group_digits, percent, plural};
 use crate::grid::{GridDelegate, GridEvent, PREVIEW_ROWS};
-use crate::import::{ImportEvent, ImportPanel};
+use crate::import::{ImportEvent, ImportPanel, Reading};
 use crate::platform;
 use crate::sql::{QueryStatus, SqlEvent, SqlPanel};
 use crate::stats::{StatsEvent, StatsPanel};
@@ -51,7 +51,7 @@ actions!(
         CopyRow,
         GoToRow,
         AdjustImport,
-        /// Escape: closes the "Go to row" field or the file notes.
+        /// Escape: closes the "Go to row" field, the file notes or the details.
         Dismiss,
     ]
 );
@@ -125,6 +125,7 @@ enum Busy {
     Searching,
     Querying,
     Exporting,
+    Reading,
 }
 
 impl Busy {
@@ -136,6 +137,64 @@ impl Busy {
             Busy::Searching => "Searching…",
             Busy::Querying => "Running query…",
             Busy::Exporting => "Exporting…",
+            Busy::Reading => "Reading values…",
+        }
+    }
+}
+
+/// How the user chose to read the file. They outlive the dataset, so a
+/// reopen can pass them on; each way of reopening keeps what still applies:
+/// - Apply in Adjust import sets the plan and decimal mark, keeping the rest.
+/// - A new delimiter or encoding finds the tables anew, so the plan and the
+///   column types go; the decimal mark stays.
+/// - Another tab drops the plan and column types, which belong to the
+///   table they were made for; delimiter, encoding and decimal mark stay.
+/// - Reset to detected drops everything.
+/// - Load anyway, after a cancelled load, keeps everything.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct Choices {
+    /// How the open part is read; `None` reads it as detected.
+    plan: Option<ImportPlan>,
+    reading: Reading,
+    /// Read as choices by column name; columns not listed are automatic.
+    types: std::collections::BTreeMap<String, ReadAs>,
+}
+
+impl Choices {
+    /// For another part of the file.
+    fn switch_part(&mut self) {
+        self.plan = None;
+        self.types.clear();
+    }
+
+    /// For a new delimiter or encoding: the tables are found anew.
+    fn redetect(&mut self, reading: Reading) {
+        self.switch_part();
+        self.reading = reading;
+    }
+
+    /// Whether the user changed how the file is read, leaving out column
+    /// types, which the strip's summary already reflects.
+    fn adjusted(&self) -> bool {
+        self.plan.is_some() || self.reading != Reading::default()
+    }
+
+    fn values(&self) -> ValueOptions {
+        ValueOptions {
+            decimal: self.reading.decimal,
+            types: self.types.clone(),
+        }
+    }
+
+    /// The options to open `part` with, all but the cache directory.
+    fn options(&self, part: Option<usize>) -> OpenOptions {
+        OpenOptions {
+            part,
+            plan: self.plan,
+            delimiter: self.reading.delimiter,
+            encoding: self.reading.encoding,
+            values: self.values(),
+            ..Default::default()
         }
     }
 }
@@ -167,26 +226,27 @@ pub struct Document {
     parts: Vec<Part>,
     /// The open part, or `None` until the first open picks one.
     part: Option<usize>,
-    /// How the user adjusted the import of the open part; `None` reads it as detected.
-    plan: Option<ImportPlan>,
-    /// The CSV delimiter the user chose; `Auto` lets the engine pick.
-    delimiter: Delimiter,
+    choices: Choices,
     /// Whether the Adjust import panel has taken over the grid's place.
     adjusting: bool,
     /// Where the open File notes popover is anchored, if it is open.
     notes_at: Option<Point<Pixels>>,
+    /// Where the open Details popover is anchored, if it is open.
+    details_at: Option<Point<Pixels>>,
     busy: Busy,
     apply_generation: u64,
     /// Separate from `apply_generation`, so sorting or filtering while SQL runs
     /// doesn't drop the query's result and leave its panel stuck on "Running".
     query_generation: u64,
     open_generation: u64,
+    /// Bumped per request to read values another way.
+    values_generation: u64,
     profile: Option<Profile>,
     selected_column: Option<usize>,
     /// Where the open column menu is anchored, if one is open.
     header_menu: Option<Point<Pixels>>,
     /// A column menu to initialise on the next render (it needs the window).
-    pending_menu: Option<(usize, Column, Option<Filter>, Option<Distribution>)>,
+    pending_menu: Option<MenuFor>,
     /// Errors from background work, shown as toasts on the next render.
     pending_errors: Vec<String>,
     show_stats: bool,
@@ -257,14 +317,15 @@ impl Document {
             notice: None,
             parts: Vec::new(),
             part: None,
-            plan: None,
-            delimiter: Delimiter::Auto,
+            choices: Choices::default(),
             adjusting: false,
             notes_at: None,
+            details_at: None,
             busy: Busy::Idle,
             apply_generation: 0,
             query_generation: 0,
             open_generation: 0,
+            values_generation: 0,
             profile: None,
             selected_column: None,
             header_menu: None,
@@ -295,8 +356,8 @@ impl Document {
     // ----- opening and loading -------------------------------------------------
 
     /// Opens (or re-opens, for another part) the file in the background,
-    /// with the user's plan and delimiter. `None` lets the engine pick the
-    /// part with the most data.
+    /// with the user's choices. `None` lets the engine pick the part with
+    /// the most data.
     pub(crate) fn open_part(&mut self, part: Option<usize>, cx: &mut Context<Self>) {
         if let Some(old) = self.dataset.take() {
             old.cancel_load();
@@ -316,6 +377,7 @@ impl Document {
         self.part = part;
         self.adjusting = false;
         self.notes_at = None;
+        self.details_at = None;
         self.busy = Busy::Idle;
         // Results from the old dataset's filters or queries must not land here.
         self.apply_generation += 1;
@@ -330,15 +392,13 @@ impl Document {
         self.import.update(cx, |panel, cx| panel.clear(cx));
 
         let path = self.path.clone();
-        let (plan, delimiter) = (self.plan, self.delimiter);
+        let options = self.choices.options(part);
         cx.spawn(async move |this, cx| {
             let opened = cx
                 .background_spawn(async move {
                     let options = OpenOptions {
                         cache_dir: platform::cache_dir(),
-                        part,
-                        plan,
-                        delimiter,
+                        ..options
                     };
                     let dataset = Dataset::open(&path, &options)?;
                     let frame = dataset.frame()?;
@@ -373,6 +433,14 @@ impl Document {
         })
         .detach();
         cx.notify();
+    }
+
+    /// Opens another part of the file, as clicking its tab does.
+    pub(crate) fn show_part(&mut self, ix: usize, cx: &mut Context<Self>) {
+        if self.part != Some(ix) {
+            self.choices.switch_part();
+            self.open_part(Some(ix), cx);
+        }
     }
 
     /// Loads a CSV/JSON file fully, reporting progress to the status bar.
@@ -412,17 +480,7 @@ impl Document {
                     Ok(frame) => {
                         this.load = Load::Done;
                         this.notice = this.dataset.as_ref().and_then(|d| d.notice());
-                        this.base = Some(frame.clone());
-                        // A SQL result on screen stays ("Back to file" shows the loaded
-                        // file); it just gets the stats it couldn't compute while loading.
-                        if this.source == Source::Query {
-                            this.profile_view(cx);
-                        } else if this.spec.is_empty() {
-                            this.show_frame(frame, cx);
-                            this.profile_view(cx);
-                        } else {
-                            this.apply(Busy::Filtering, cx);
-                        }
+                        this.show_base(frame, cx);
                     }
                     Err(err) if err.is::<Cancelled>() => this.load = Load::Cancelled,
                     Err(err) => {
@@ -434,6 +492,103 @@ impl Document {
             });
         })
         .detach();
+    }
+
+    /// Makes `frame` the whole file and shows it with the sort, filters and
+    /// search re-applied. A SQL result on screen stays ("Back to file" shows
+    /// the new frame); it just gets the stats it couldn't compute while loading.
+    fn show_base(&mut self, frame: Frame, cx: &mut Context<Self>) {
+        self.base = Some(frame.clone());
+        if self.source == Source::Query {
+            self.profile_view(cx);
+        } else if self.spec.is_empty() {
+            self.show_frame(frame, cx);
+            self.profile_view(cx);
+        } else {
+            self.apply(Busy::Filtering, cx);
+        }
+    }
+
+    /// Reads `column` as `read_as` from now on (`Auto` forgets the choice),
+    /// without reopening the file. A filter on the column goes: its values
+    /// were typed for the old type.
+    pub(crate) fn read_column_as(
+        &mut self,
+        column: String,
+        read_as: ReadAs,
+        cx: &mut Context<Self>,
+    ) {
+        if read_as == ReadAs::Auto {
+            self.choices.types.remove(&column);
+        } else {
+            self.choices.types.insert(column.clone(), read_as);
+        }
+        self.spec.filters.retain(|f| f.column != column);
+        self.sync_spec_to_grid(cx);
+        self.read_values(cx);
+    }
+
+    /// Makes the dataset read values as the choices say, in the background,
+    /// then shows the new whole-file frame.
+    fn read_values(&mut self, cx: &mut Context<Self>) {
+        let Some(dataset) = self.dataset.clone() else {
+            return;
+        };
+        let values = self.choices.values();
+        // A sort or filter still running derives from the base frame about
+        // to be replaced, and `read_column_as` may have just dropped its
+        // filter. `show_base` re-applies only when some remain, so without
+        // this an older result could land after the new base and put back
+        // the old column types. A SQL result's sort doesn't use the base.
+        // (Not unit-tested: it needs a window and a worker held mid-flight.)
+        if self.source == Source::File {
+            self.apply_generation += 1;
+        }
+        self.values_generation += 1;
+        let (generation, open) = (self.values_generation, self.open_generation);
+        self.busy = Busy::Reading;
+        cx.spawn(async move |this, cx| {
+            let (read, now) = cx
+                .background_spawn(async move {
+                    let read = dataset.set_values(&values);
+                    (read, dataset.values())
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.open_generation != open {
+                    return;
+                }
+                // Requests can finish out of order, and the last to run is what
+                // the dataset reads. If that isn't the latest choice, ask again.
+                if now != this.choices.values() {
+                    this.read_values(cx);
+                    return;
+                }
+                if this.values_generation != generation {
+                    return;
+                }
+                this.busy = Busy::Idle;
+                match read {
+                    Ok(frame) => this.show_base(frame, cx),
+                    Err(err) => {
+                        this.notify_error(
+                            format!("Couldn't read the values that way: {err:#}"),
+                            cx,
+                        );
+                        // The filter dropped for it goes from the view too.
+                        this.apply(Busy::Filtering, cx);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    pub(crate) fn close_details(&mut self, cx: &mut Context<Self>) {
+        self.details_at = None;
+        cx.notify();
     }
 
     fn cancel_load(&mut self, _: &CancelLoad, _: &mut Window, cx: &mut Context<Self>) {
@@ -642,7 +797,7 @@ impl Document {
     }
 
     fn dismiss(&mut self, _: &Dismiss, window: &mut Window, cx: &mut Context<Self>) {
-        if self.notes_at.take().is_some() {
+        if self.notes_at.take().is_some() || self.details_at.take().is_some() {
             cx.notify();
         }
         if self.goto_open {
@@ -833,9 +988,25 @@ impl Document {
             .find(|f| f.column == column.name)
             .cloned();
         let sketch = self.sketch_for(col);
+        // Columns of the file itself can be read another way; Parquet
+        // columns are typed already.
+        let read_as = self
+            .dataset
+            .clone()
+            .filter(|d| self.source == Source::File && d.kind() != FileKind::Parquet)
+            .map(|d| {
+                let current = self.choices.types.get(&column.name).copied();
+                (d, current.unwrap_or_default())
+            });
         self.header_menu = Some(position);
         // The editor needs the window to focus its input, so it's set up in render.
-        self.pending_menu = Some((col, column, existing, sketch));
+        self.pending_menu = Some(MenuFor {
+            col_ix: col,
+            column,
+            filter: existing,
+            sketch,
+            read_as,
+        });
         cx.notify();
     }
 
@@ -863,6 +1034,9 @@ impl Document {
                 self.selected_column = Some(*col);
                 self.refresh_stats(cx);
                 crate::refresh_menus(cx);
+            }
+            FilterEvent::ReadAs { column, read_as } => {
+                self.read_column_as(column.clone(), *read_as, cx)
             }
             FilterEvent::Dismiss => {}
         }
@@ -1043,9 +1217,10 @@ impl Document {
         };
         self.adjusting = true;
         self.notes_at = None;
-        let delimiter = self.delimiter;
+        self.details_at = None;
+        let reading = self.choices.reading;
         self.import
-            .update(cx, |panel, cx| panel.open(dataset, delimiter, window, cx));
+            .update(cx, |panel, cx| panel.open(dataset, reading, window, cx));
         cx.notify();
     }
 
@@ -1057,36 +1232,40 @@ impl Document {
         cx: &mut Context<Self>,
     ) {
         match event {
-            ImportEvent::Apply(plan) => {
-                if self.dataset.as_ref().and_then(|d| d.plan()) == Some(plan) {
+            ImportEvent::Apply(plan, decimal) => {
+                let same_plan = self.dataset.as_ref().and_then(|d| d.plan()) == Some(plan);
+                if same_plan && *decimal == self.choices.reading.decimal {
                     self.adjusting = false;
                 } else {
-                    self.plan = Some(*plan);
+                    self.choices.plan = Some(*plan);
+                    self.choices.reading.decimal = *decimal;
                     self.open_part(self.part, cx);
                 }
             }
-            ImportEvent::Redetect(delimiter) => {
-                self.delimiter = *delimiter;
-                self.plan = None;
+            ImportEvent::Redetect(reading) => {
+                self.choices.redetect(*reading);
                 self.open_part(None, cx);
             }
-            ImportEvent::Reset => {
-                // Parts found with a chosen delimiter may not exist under Auto.
-                let part = if self.delimiter == Delimiter::Auto {
-                    self.part
-                } else {
-                    None
-                };
-                self.plan = None;
-                self.delimiter = Delimiter::Auto;
-                self.open_part(part, cx);
-            }
+            ImportEvent::Reset => self.reset_import(cx),
             ImportEvent::Cancel => {
                 self.adjusting = false;
                 self.table.read(cx).focus_handle(cx).focus(window, cx);
             }
         }
         cx.notify();
+    }
+
+    /// Reopens the file as detected, forgetting every choice. Parts found
+    /// with a chosen delimiter or encoding may not exist under Auto.
+    fn reset_import(&mut self, cx: &mut Context<Self>) {
+        let reading = self.choices.reading;
+        let part = if reading.delimiter == Delimiter::Auto && reading.encoding == Encoding::Auto {
+            self.part
+        } else {
+            None
+        };
+        self.choices = Choices::default();
+        self.open_part(part, cx);
     }
 
     // ----- copy and export -------------------------------------------------------
@@ -1392,25 +1571,25 @@ impl Document {
                             )
                         })
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            if this.part != Some(ix) {
-                                // A plan belongs to the part it was made for.
-                                this.plan = None;
-                                this.open_part(Some(ix), cx);
-                            }
+                            this.show_part(ix, cx);
                         }))
                 })),
         )
     }
 
-    /// The quiet line saying what the import did, with its File notes and
-    /// Adjust import actions. Absent for a file read plainly.
+    /// The quiet line saying what the import did, with its Details, File
+    /// notes and Adjust import actions. Absent for a file read plainly.
     fn render_import_strip(&self, cx: &mut Context<Self>) -> Option<Div> {
         let dataset = self.dataset.as_ref()?;
-        let adjusted = self.plan.is_some() || self.delimiter != Delimiter::Auto;
+        let conversions = dataset.conversions();
         let text = if self.adjusting {
             "Adjusting import. The grid updates when you apply.".to_string()
         } else {
-            strip_text(dataset.summary(), adjusted)?
+            strip_text(
+                dataset.summary().as_deref(),
+                self.choices.adjusted(),
+                &conversions,
+            )?
         };
         let palette = theme::palette(cx);
         let link = |id: &'static str, label: &'static str, cx: &mut Context<Self>| {
@@ -1449,6 +1628,18 @@ impl Document {
                         .truncate()
                         .child(SharedString::from(text)),
                 )
+                .when(show_actions && !conversions.is_empty(), |this| {
+                    this.child(link("details", "Details", cx).on_click(cx.listener(
+                        |this, event: &ClickEvent, _, cx| {
+                            this.details_at = match this.details_at {
+                                Some(_) => None,
+                                None => Some(event.position()),
+                            };
+                            this.notes_at = None;
+                            cx.notify();
+                        },
+                    )))
+                })
                 .when(show_actions && !dataset.notes().is_empty(), |this| {
                     this.child(link("file-notes", "File notes", cx).on_click(cx.listener(
                         |this, event: &ClickEvent, _, cx| {
@@ -1456,6 +1647,7 @@ impl Document {
                                 Some(_) => None,
                                 None => Some(event.position()),
                             };
+                            this.details_at = None;
                             cx.notify();
                         },
                     )))
@@ -1583,6 +1775,18 @@ impl Document {
         )
     }
 
+    /// The Details popover, if it is open.
+    fn render_details(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let position = self.details_at?;
+        let conversions = self.dataset.as_ref()?.conversions();
+        Some(crate::details::render(
+            &conversions,
+            &self.choices.types,
+            position,
+            cx,
+        ))
+    }
+
     /// Removable chips for the active sort keys, filters and query.
     fn render_chips(&self, cx: &mut Context<Self>) -> Option<Div> {
         if self.spec.sort.is_empty() && self.spec.filters.is_empty() && self.source == Source::File
@@ -1667,7 +1871,12 @@ impl Document {
             );
         }
         for (ix, filter) in self.spec.filters.iter().enumerate() {
-            let text = format!("{} {}", filter.column, describe_filter(&filter.op));
+            let format = self
+                .view
+                .as_ref()
+                .and_then(|f| f.columns.iter().find(|c| c.name == filter.column))
+                .and_then(|c| c.format);
+            let text = format!("{} {}", filter.column, describe_filter(&filter.op, format));
             chips.push(
                 chip(("chip-filter", ix).into(), "icons/funnel.svg", text, cx)
                     .child(
@@ -1891,15 +2100,31 @@ impl Document {
                     .text_sm()
                     .text_center()
                     .text_color(cx.theme().muted_foreground)
-                    .child(SharedString::from(message.to_string())),
+                    // DuckDB follows its reason with pages of reader settings.
+                    .child(SharedString::from(
+                        message.split("\n\n").next().unwrap_or(message).to_string(),
+                    )),
             )
             .child(
-                Button::new("open-another")
-                    .small()
-                    .label("Open Another File…")
-                    .on_click(|_, window, cx| {
-                        window.dispatch_action(Box::new(crate::Open), cx);
-                    }),
+                h_flex()
+                    .gap(px(8.))
+                    // A choice made in Adjust import may be why it failed.
+                    .when(self.choices.adjusted(), |this| {
+                        this.child(
+                            Button::new("reset-import")
+                                .small()
+                                .label("Reset Import")
+                                .on_click(cx.listener(|this, _, _, cx| this.reset_import(cx))),
+                        )
+                    })
+                    .child(
+                        Button::new("open-another")
+                            .small()
+                            .label("Open Another File…")
+                            .on_click(|_, window, cx| {
+                                window.dispatch_action(Box::new(crate::Open), cx);
+                            }),
+                    ),
             )
     }
 
@@ -1909,10 +2134,9 @@ impl Document {
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let position = self.header_menu?;
-        if let Some((col, column, existing, sketch)) = self.pending_menu.take() {
-            self.filter_editor.update(cx, |editor, cx| {
-                editor.open(col, column, existing.as_ref(), sketch.as_ref(), window, cx)
-            });
+        if let Some(menu) = self.pending_menu.take() {
+            self.filter_editor
+                .update(cx, |editor, cx| editor.open(menu, window, cx));
         }
         Some(
             deferred(
@@ -1969,7 +2193,34 @@ impl Document {
         if self.adjusting && self.import.read(cx).is_loading() {
             return Some("previewing the import");
         }
+        if self.header_menu.is_some() && self.filter_editor.read(cx).is_counting() {
+            return Some("counting values that fit");
+        }
         None
+    }
+
+    /// Opens the column menu of the column called `name`, as its header's
+    /// menu button does.
+    pub(crate) fn open_menu_named(&mut self, name: &str, cx: &mut Context<Self>) {
+        let col = self
+            .view
+            .as_ref()
+            .and_then(|f| f.columns.iter().position(|c| c.name == name))
+            .unwrap_or_else(|| panic!("{} has no column named {name:?}", self.name));
+        self.open_header_menu(col, point(px(360.), px(TOOLBAR_HEIGHT + 64.)), cx);
+    }
+
+    /// The column menu, for steps that use it as a user would.
+    pub(crate) fn filter_editor(&self) -> Entity<FilterEditor> {
+        self.filter_editor.clone()
+    }
+
+    /// Opens the Details popover, as clicking "Details" does, anchored
+    /// below the strip's right end.
+    pub(crate) fn show_details(&mut self, window: &Window, cx: &mut Context<Self>) {
+        let right = window.viewport_size().width - px(12.);
+        self.details_at = Some(point(right, px(TOOLBAR_HEIGHT + 20.)));
+        cx.notify();
     }
 
     /// The Adjust import panel, for steps that edit it as a user would.
@@ -1987,23 +2238,52 @@ impl Document {
 }
 
 /// What the import strip says: the engine's summary, led by "Adjusted
-/// import." when the user changed how the file is read. `None` hides it.
-fn strip_text(summary: Option<&str>, adjusted: bool) -> Option<String> {
-    match (summary, adjusted) {
-        (summary, false) => summary.map(str::to_string),
-        (Some(summary), true) => Some(format!("Adjusted import. {summary}")),
-        (None, true) => Some("Adjusted import.".into()),
+/// import." when the user changed how the file is read, and followed by the
+/// columns whose day/month order or decimal mark is a guess. When the
+/// summary has nothing to say but columns still show differently (spaces
+/// trimmed, say), it says so, so Details can be reached. `None` hides it.
+fn strip_text(summary: Option<&str>, adjusted: bool, conversions: &[Conversion]) -> Option<String> {
+    let guessed = |what: Guessed| {
+        conversions
+            .iter()
+            .filter(|c| c.guessed == Some(what))
+            .map(|c| c.column.as_str())
+            .collect::<Vec<_>>()
+    };
+    let mut sentences: Vec<String> = Vec::new();
+    if adjusted {
+        sentences.push("Adjusted import.".into());
     }
+    match summary {
+        Some(summary) => sentences.push(summary.into()),
+        None if !conversions.is_empty() => sentences.push(format!(
+            "Tidied the values of {}.",
+            plural(conversions.len() as u64, "column")
+        )),
+        None => {}
+    }
+    for (what, sentence) in [
+        (Guessed::DateOrder, "Month or day first in"),
+        (Guessed::DecimalMark, "The decimal mark in"),
+    ] {
+        let columns = guessed(what);
+        if !columns.is_empty() {
+            sentences.push(format!("{sentence} {} is a guess.", columns.join(", ")));
+        }
+    }
+    (!sentences.is_empty()).then(|| sentences.join(" "))
 }
 
-/// Like [`FilterOp::describe`], with long decimals trimmed for the chip.
-fn describe_filter(op: &FilterOp) -> String {
+/// Like [`FilterOp::describe`], with numbers shown as their column shows
+/// them (`format`), or with long decimals trimmed.
+fn describe_filter(op: &FilterOp, format: Option<NumberFormat>) -> String {
+    let show = |v: &str| formatted(format, v).unwrap_or_else(|| tidy_number(v));
     match op {
-        FilterOp::Equals(v) => format!("= {}", tidy_number(v)),
-        FilterOp::NotEquals(v) => format!("≠ {}", tidy_number(v)),
-        FilterOp::GreaterThan(v) => format!("> {}", tidy_number(v)),
-        FilterOp::LessThan(v) => format!("< {}", tidy_number(v)),
-        FilterOp::Between(a, b) => format!("{} – {}", tidy_number(a), tidy_number(b)),
+        FilterOp::Equals(v) => format!("= {}", show(v)),
+        FilterOp::NotEquals(v) => format!("≠ {}", show(v)),
+        FilterOp::GreaterThan(v) => format!("> {}", show(v)),
+        FilterOp::LessThan(v) => format!("< {}", show(v)),
+        FilterOp::Between(a, b) => format!("{} – {}", show(a), show(b)),
         other => other.describe(),
     }
 }
@@ -2135,24 +2415,128 @@ impl Render for Document {
             .child(self.render_status(cx))
             .children(self.render_header_menu(window, cx))
             .children(self.render_notes(cx))
+            .children(self.render_details(cx))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::strip_text;
+    use da_core::{
+        Conversion, Decimal, Delimiter, Encoding, FilterOp, Guessed, ImportPlan, NumberFormat,
+        ReadAs, Rows,
+    };
+
+    use super::{Choices, Reading, describe_filter, strip_text};
 
     #[test]
     fn the_strip_says_when_the_import_was_adjusted() {
-        assert_eq!(strip_text(None, false), None);
+        assert_eq!(strip_text(None, false, &[]), None);
         assert_eq!(
-            strip_text(Some("Table found."), false).as_deref(),
+            strip_text(Some("Table found."), false, &[]).as_deref(),
             Some("Table found.")
         );
         assert_eq!(
-            strip_text(Some("5 total rows kept in the data."), true).as_deref(),
+            strip_text(Some("5 total rows kept in the data."), true, &[]).as_deref(),
             Some("Adjusted import. 5 total rows kept in the data.")
         );
-        assert_eq!(strip_text(None, true).as_deref(), Some("Adjusted import."));
+        assert_eq!(
+            strip_text(None, true, &[]).as_deref(),
+            Some("Adjusted import.")
+        );
+    }
+
+    #[test]
+    fn the_strip_points_at_details() {
+        let conversion = |column: &str, read_as, guessed| Conversion {
+            column: column.into(),
+            read_as,
+            notes: vec!["any wording".into()],
+            guessed,
+        };
+        // Only spaces trimmed: the summary is quiet, but Details has a row.
+        let trimmed = [conversion("name", ReadAs::Text, None)];
+        assert_eq!(
+            strip_text(None, false, &trimmed).as_deref(),
+            Some("Tidied the values of 1 column.")
+        );
+        // What was guessed, whatever the notes say.
+        let guessed = [
+            conversion("placed", ReadAs::MonthFirstDate, Some(Guessed::DateOrder)),
+            conversion("weight", ReadAs::Number, Some(Guessed::DecimalMark)),
+        ];
+        assert_eq!(
+            strip_text(Some("Read 1 text column as dates."), false, &guessed).as_deref(),
+            Some(
+                "Read 1 text column as dates. Month or day first in placed is a guess. \
+                 The decimal mark in weight is a guess."
+            )
+        );
+    }
+
+    #[test]
+    fn reopening_keeps_the_choices_that_still_apply() {
+        let plan = ImportPlan {
+            header: Some(Rows { first: 2, last: 2 }),
+            data: Rows { first: 3, last: 9 },
+            keep_totals: false,
+        };
+        let chosen = Choices {
+            plan: Some(plan),
+            reading: Reading {
+                delimiter: Delimiter::Semicolon,
+                encoding: Encoding::Windows1252,
+                decimal: Decimal::Comma,
+            },
+            types: [("zip".to_string(), ReadAs::Number)].into(),
+        };
+        let options = chosen.options(Some(1));
+        assert_eq!(options.part, Some(1));
+        assert_eq!(options.plan, Some(plan));
+        assert_eq!(options.encoding, Encoding::Windows1252);
+        assert_eq!(options.values.decimal, Decimal::Comma);
+        assert_eq!(options.values.types.get("zip"), Some(&ReadAs::Number));
+
+        // Another tab: the table's own choices go, the file's stay.
+        let mut tab = chosen.clone();
+        tab.switch_part();
+        assert_eq!(tab.plan, None);
+        assert!(tab.types.is_empty());
+        assert_eq!(tab.reading, chosen.reading);
+        assert!(tab.adjusted());
+
+        // A new encoding finds the tables anew.
+        let mut redetected = chosen.clone();
+        let reading = Reading {
+            encoding: Encoding::Utf8,
+            ..chosen.reading
+        };
+        redetected.redetect(reading);
+        assert_eq!(redetected.plan, None);
+        assert!(redetected.types.is_empty());
+        assert_eq!(redetected.reading.decimal, Decimal::Comma);
+
+        // Reset to detected is the default: nothing chosen, nothing adjusted.
+        assert!(!Choices::default().adjusted());
+        assert_eq!(Choices::default().options(None).values, Default::default());
+    }
+
+    #[test]
+    fn chips_show_numbers_as_their_column_does() {
+        let percent = Some(NumberFormat::Percent { decimals: 1 });
+        let between = FilterOp::Between("0.1".into(), "0.25".into());
+        assert_eq!(describe_filter(&between, percent), "10.0% – 25.0%");
+        assert_eq!(describe_filter(&between, None), "0.1 – 0.25");
+        let dollars = Some(NumberFormat::Currency {
+            symbol: '$',
+            decimals: 0,
+        });
+        assert_eq!(
+            describe_filter(&FilterOp::GreaterThan("1000".into()), dollars),
+            "> $1,000"
+        );
+        assert_eq!(
+            describe_filter(&FilterOp::Contains("abc".into()), dollars),
+            "contains “abc”"
+        );
     }
 }

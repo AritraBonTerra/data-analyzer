@@ -148,7 +148,7 @@ fn clean_file_is_unchanged() {
             ("revenue", "DOUBLE"),
         ]
     );
-    assert_eq!(o.dataset.summary(), None);
+    assert_eq!(o.dataset.summary().as_deref(), None);
     assert!(o.dataset.notes().is_empty());
     assert_eq!(o.dataset.delimiter(), Some(Delimiter::Comma));
 }
@@ -159,7 +159,7 @@ fn report_preamble_sets_aside_titles_total_and_note() {
     assert_eq!(o.columns(), REPORT_COLUMNS);
     assert_eq!(o.rows(), 40);
     assert_eq!(
-        o.dataset.summary(),
+        o.dataset.summary().as_deref(),
         Some("Table found on lines 5 to 45. Set aside 3 title lines, 1 total and 1 note.")
     );
     let notes: Vec<(usize, RowRole)> = o.dataset.notes().iter().map(|n| (n.row, n.role)).collect();
@@ -212,7 +212,7 @@ fn two_stacked_tables_are_two_parts() {
     );
     assert_eq!(first.rows(), 4);
     assert_eq!(
-        first.dataset.summary(),
+        first.dataset.summary().as_deref(),
         Some("2 tables in the file. Showing lines 1 to 5.")
     );
 }
@@ -222,7 +222,7 @@ fn headerless_file_is_unchanged() {
     let o = open("05_no_header.csv");
     assert_eq!(o.rows(), 40);
     assert_eq!(o.names()[0], "column0", "still DuckDB's own reading");
-    assert_eq!(o.dataset.summary(), None);
+    assert_eq!(o.dataset.summary().as_deref(), None);
 }
 
 #[test]
@@ -259,7 +259,7 @@ fn wide_months_is_unchanged() {
     let o = open("07_wide_months.csv");
     assert_eq!(o.rows(), 12);
     assert_eq!(o.names().len(), 8);
-    assert_eq!(o.dataset.summary(), None);
+    assert_eq!(o.dataset.summary().as_deref(), None);
 }
 
 #[test]
@@ -301,7 +301,7 @@ fn subtotals_are_left_out_unless_kept() {
     assert_eq!(o.rows(), 12);
     assert_eq!(o.scalar("SELECT sum(Revenue) FROM data"), "53504");
     assert_eq!(
-        o.dataset.summary(),
+        o.dataset.summary().as_deref(),
         Some("5 total rows set aside. They are left out of stats and charts.")
     );
     assert_eq!(
@@ -329,7 +329,7 @@ fn subtotals_are_left_out_unless_kept() {
     assert_eq!(kept.rows(), 17);
     assert_eq!(kept.dataset.plan(), Some(&plan));
     assert_eq!(
-        kept.dataset.summary(),
+        kept.dataset.summary().as_deref(),
         Some("5 total rows kept in the data.")
     );
     assert!(kept.dataset.notes().is_empty(), "kept totals are data");
@@ -369,7 +369,7 @@ fn excel_report_finds_the_table_at_b5() {
     assert_eq!(o.rows(), 40);
     assert_eq!(o.parts(), [("Weekly Sales", Some(40), Some("B5:H45"))]);
     assert_eq!(
-        o.dataset.summary(),
+        o.dataset.summary().as_deref(),
         Some("Table found at B5:H45. Set aside 2 title rows, 1 total and 1 note.")
     );
 }
@@ -389,7 +389,7 @@ fn merged_group_headers_carry_right() {
     );
     assert_eq!(o.rows(), 4);
     assert_eq!(
-        o.dataset.summary(),
+        o.dataset.summary().as_deref(),
         Some("Table at A1:E6. 2 header rows joined into one.")
     );
 }
@@ -408,7 +408,7 @@ fn side_by_side_tables_are_parts_named_by_caption() {
     assert_eq!(o.names(), ["Product", "Units", "Return rate"]);
     assert_eq!(o.rows(), 5);
     assert_eq!(
-        o.dataset.summary(),
+        o.dataset.summary().as_deref(),
         Some("2 tables on sheet Dashboard. Showing F2:H7. Set aside 1 title row.")
     );
     assert_eq!(note_roles(&o), [(1, RowRole::Title, "Top products")]);
@@ -437,10 +437,14 @@ fn year_headers_are_names() {
     );
     assert_eq!(o.rows(), 4);
 
-    // The Formats sheet is out of scope here and reads as before.
+    // The Formats sheet is read whole, so the finder has nothing to say;
+    // what it says is the cleaner's (see `read_values.rs`).
     let formats = open_part("23_year_headers_and_formats.xlsx", 1);
     assert_eq!(formats.rows(), 12);
-    assert_eq!(formats.dataset.summary(), None);
+    assert_eq!(
+        formats.dataset.summary().as_deref(),
+        Some("Read 2 text columns as numbers and 1 as dates. #DIV/0! read as empty.")
+    );
 }
 
 #[test]
@@ -458,7 +462,7 @@ fn cover_sheet_workbook_opens_on_the_data() {
         [("Northwind Foods data extract", "VARCHAR")]
     );
     assert_eq!(readme.rows(), 7);
-    assert_eq!(readme.dataset.summary(), None);
+    assert_eq!(readme.dataset.summary().as_deref(), None);
 }
 
 #[test]
@@ -467,7 +471,7 @@ fn xls_report_sets_aside_the_adjacent_total() {
     assert_eq!(o.columns(), REPORT_COLUMNS);
     assert_eq!(o.rows(), 40);
     assert_eq!(
-        o.dataset.summary(),
+        o.dataset.summary().as_deref(),
         Some("Table found at A4:G45. Set aside 2 title rows and 1 total.")
     );
     assert_eq!(
@@ -484,7 +488,9 @@ fn xls_report_sets_aside_the_adjacent_total() {
     );
 }
 
-/// Files this task leaves alone: their columns and row counts as before.
+/// Files the finder leaves alone: their columns and row counts as before,
+/// and nothing to say about the table. The values in `02`, `03` and `10`,
+/// and the encoding of `08`, are read by the cleaner: see `read_values.rs`.
 #[test]
 fn out_of_scope_files_are_unchanged() {
     let cases: [(&str, u64, &[&str]); 7] = [
@@ -540,19 +546,12 @@ fn out_of_scope_files_are_unchanged() {
         let o = open(name);
         assert_eq!(o.rows(), rows, "{name}");
         assert_eq!(o.names(), names, "{name}");
-        assert_eq!(o.dataset.summary(), None, "{name}");
+        let summary = o.dataset.summary().unwrap_or_default();
+        assert!(
+            summary.is_empty() || summary.starts_with("Read "),
+            "{name}: {summary}"
+        );
     }
-    // Not UTF-8: still fails as before (feature 2 reads it).
-    let cache = std::env::temp_dir().join(format!("da-find-table-latin1-{}", std::process::id()));
-    let latin1 = Dataset::open(
-        &messy("08_latin1.csv"),
-        &OpenOptions {
-            cache_dir: cache.clone(),
-            ..Default::default()
-        },
-    );
-    assert!(latin1.is_err());
-    let _ = std::fs::remove_dir_all(cache);
 }
 
 #[test]
@@ -661,7 +660,7 @@ fn a_column_of_years_is_data_not_header() {
     );
     assert_eq!(o.columns(), [("title", "VARCHAR"), ("year", "BIGINT")]);
     assert_eq!(o.rows(), 6);
-    assert_eq!(o.dataset.summary(), None);
+    assert_eq!(o.dataset.summary().as_deref(), None);
 
     // Years over numbers that are not years are still a header.
     let o = open_csv("date,2020,2021\n2024-01-01,5,6\n2024-01-02,7,8\n");
@@ -675,7 +674,7 @@ fn only_real_totals_rows_are_set_aside() {
     assert_eq!(o.rows(), 2);
     assert_eq!(o.scalar("SELECT sum(revenue) FROM data"), "59");
     assert_eq!(
-        o.dataset.summary(),
+        o.dataset.summary().as_deref(),
         Some("1 total row set aside. It is left out of stats and charts.")
     );
 
@@ -730,7 +729,7 @@ fn a_plan_reports_the_rows_it_leaves_out() {
     let o = open_csv_with("name,amount\nAlice,10\nBob,20\nCarol,\n", plan);
     assert_eq!(o.rows(), 1);
     assert_eq!(
-        o.dataset.summary(),
+        o.dataset.summary().as_deref(),
         Some("Table found on lines 1 to 3. Set aside 1 title line and 1 note.")
     );
     assert_eq!(
@@ -763,7 +762,11 @@ fn the_detected_plan_passed_back_reads_the_same() {
                 ..Default::default()
             },
         );
-        assert_eq!(o.dataset.summary(), detected.dataset.summary(), "{file}");
+        assert_eq!(
+            o.dataset.summary().as_deref(),
+            detected.dataset.summary().as_deref(),
+            "{file}"
+        );
         assert_eq!(o.dataset.notes(), detected.dataset.notes(), "{file}");
     }
 }
@@ -801,7 +804,7 @@ fn a_header_moved_down_turns_the_old_header_into_a_note() {
     );
     assert!(o.dataset.notes()[3].text.starts_with("Order ID Order Date"));
     assert_eq!(
-        o.dataset.summary(),
+        o.dataset.summary().as_deref(),
         Some("Table found on lines 6 to 45. Set aside 4 title lines, 1 total and 1 note.")
     );
 }
@@ -822,7 +825,7 @@ fn a_spacer_column_keeps_a_plain_sheet_as_before() {
     );
     assert_eq!(o.rows(), 3);
     assert_eq!(o.parts(), [("Report", Some(3), Some("A1:E4"))]);
-    assert_eq!(o.dataset.summary(), None);
+    assert_eq!(o.dataset.summary().as_deref(), None);
 }
 
 #[test]
@@ -832,7 +835,7 @@ fn a_title_right_above_the_header_is_a_title_not_the_label() {
     let labels: Vec<&str> = o.parts().iter().map(|p| p.0).collect();
     assert_eq!(labels, ["Jan", "Feb", "Mar"]);
     assert_eq!(
-        o.dataset.summary(),
+        o.dataset.summary().as_deref(),
         Some("Table found at A2:C5. Set aside 1 title row.")
     );
     assert_eq!(
@@ -844,7 +847,7 @@ fn a_title_right_above_the_header_is_a_title_not_the_label() {
     let o = open_csv("Weekly report\nid,units\n1,2\n3,4\n5,6\n");
     assert_eq!(o.parts(), [("Table 1", Some(3), Some("lines 2 to 5"))]);
     assert_eq!(
-        o.dataset.summary(),
+        o.dataset.summary().as_deref(),
         Some("Table found on lines 2 to 5. Set aside 1 title line.")
     );
     assert_eq!(note_roles(&o), [(1, RowRole::Title, "Weekly report")]);
@@ -852,7 +855,7 @@ fn a_title_right_above_the_header_is_a_title_not_the_label() {
     let o = open_csv("Weekly report\nGenerated today\nid,units\n1,2\n3,4\n5,6\n");
     assert_eq!(o.parts()[0].0, "Table 1");
     assert_eq!(
-        o.dataset.summary(),
+        o.dataset.summary().as_deref(),
         Some("Table found on lines 3 to 6. Set aside 2 title lines.")
     );
     assert_eq!(
@@ -874,7 +877,7 @@ fn a_one_cell_title_is_never_a_group_label() {
         Some(Rows { first: 2, last: 2 })
     );
     assert_eq!(
-        o.dataset.summary(),
+        o.dataset.summary().as_deref(),
         Some("Table found at A2:D7. Set aside 1 title row.")
     );
     assert_eq!(note_roles(&o), [(1, RowRole::Title, "Customer follow-ups")]);

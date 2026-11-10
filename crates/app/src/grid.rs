@@ -6,13 +6,13 @@ use std::collections::HashSet;
 use std::ops::Range;
 use std::sync::Arc;
 
-use da_core::{ColumnKind, ColumnSummary, Dataset, Distribution, Frame, SortKey};
+use da_core::{ColumnKind, ColumnSummary, Dataset, Distribution, Frame, NumberFormat, SortKey};
 use gpui_kit::component::table::{Column, TableDelegate, TableState};
 use gpui_kit::component::{ActiveTheme, Icon, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
-use crate::format::{self, percent};
+use crate::format::{self, formatted, percent};
 use crate::pages::{PAGE_SIZE, PageCache};
 use crate::theme::{self, kind_icon, tabular};
 
@@ -280,7 +280,14 @@ impl GridDelegate {
             .map(|ix| (ix, self.sort[ix].descending))
     }
 
-    fn render_sketch(&self, sketch: &Distribution, cx: &App) -> AnyElement {
+    /// A header's small chart. `format` is the column's number format, for
+    /// the top value's label.
+    fn render_sketch(
+        &self,
+        sketch: &Distribution,
+        format: Option<NumberFormat>,
+        cx: &App,
+    ) -> AnyElement {
         let palette = theme::palette(cx);
         match sketch {
             Distribution::Histogram(bins) => {
@@ -320,7 +327,10 @@ impl GridDelegate {
                     .find(|(value, _)| value.is_some())
                     .or(values.first());
                 let label = top.map(|(value, count)| {
-                    let name = value.as_deref().unwrap_or("null");
+                    let name = match value {
+                        Some(v) => formatted(format, v).unwrap_or_else(|| v.clone()),
+                        None => "null".into(),
+                    };
                     let name: String = name.chars().take(18).collect();
                     format!("{name} {}", percent(*count as f64 / total as f64))
                 });
@@ -543,7 +553,7 @@ impl TableDelegate for GridDelegate {
                     .when(is_number, |this| this.flex_row_reverse())
                     .child(div().flex_1().min_w_0().when_some(
                         profile.as_ref().and_then(|p| p.sketch.as_ref()),
-                        |this, s| this.child(self.render_sketch(s, cx)),
+                        |this, s| this.child(self.render_sketch(s, column.format, cx)),
                     ))
                     .when_some(null_text, |this, text| {
                         this.child(

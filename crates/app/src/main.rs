@@ -4,6 +4,7 @@
 //! bar, routing of files to windows (CLI args, ⌘O, Finder, drag and drop) and
 //! the app-wide state (recent files, open windows).
 
+mod details;
 mod document;
 mod filter;
 mod format;

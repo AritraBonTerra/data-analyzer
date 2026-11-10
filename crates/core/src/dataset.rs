@@ -6,6 +6,10 @@ use std::time::Duration;
 use anyhow::{Context as _, Result, anyhow, bail};
 use duckdb::{Connection, InterruptHandle};
 
+use crate::clean::{
+    self, Cleaning, Conversion, Decimal, Fit, Mark, NumberFormat, ReadAs, ValueOptions,
+};
+use crate::encoding::{self, Decode, Encoding};
 use crate::excel;
 use crate::format::FileKind;
 use crate::import::{self, Delimiter, Import, ImportPlan, Load, Note, Part, Preview, Scan};
@@ -45,6 +49,10 @@ pub struct Column {
     /// DuckDB's type name, e.g. `BIGINT` or `DECIMAL(18,3)`.
     pub sql_type: String,
     pub kind: ColumnKind,
+    /// How [`Dataset::fetch`] shows the values: set on a number column read
+    /// from text like `$1,234.00` or `12.6%`, so it shows the way the file
+    /// wrote it. Kept by sorted and filtered frames, never on SQL results.
+    pub format: Option<NumberFormat>,
 }
 
 impl Column {
@@ -54,6 +62,7 @@ impl Column {
             name: name.into(),
             kind: ColumnKind::from_sql(&sql_type),
             sql_type,
+            format: None,
         }
     }
 }
@@ -163,12 +172,21 @@ pub struct OpenOptions {
     /// The CSV/TSV delimiter. Ignored for other formats. The parts depend on
     /// it, so a change usually goes with `part: None, plan: None`.
     pub delimiter: Delimiter,
+    /// The text encoding of a CSV/TSV file. Ignored for other formats and
+    /// for compressed files. Like the delimiter, it changes the parts.
+    pub encoding: Encoding,
+    /// How values are read: the decimal mark and the type of each column.
+    /// Pass [`Dataset::values`] to keep the user's choices on a reopen.
+    pub values: ValueOptions,
 }
 
 /// Longest cell text returned by [`Dataset::fetch`]; the grid can't show more anyway.
 const MAX_CELL_CHARS: usize = 2000;
 /// Highest fallback level for reading CSV/JSON; see [`Dataset::reader`].
 const MAX_LEVEL: u8 = 3;
+/// Rows of a CSV/JSON file not loaded yet that the cleaner looks at. They
+/// are kept in the table `_preview` until the file is loaded.
+const PREVIEW_ROWS: u64 = 5000;
 
 /// One open file. Every method blocks, so call them off the UI thread. Each call
 /// uses its own DuckDB connection, so calls from different threads run in parallel.
@@ -179,10 +197,29 @@ const MAX_LEVEL: u8 = 3;
 pub struct Dataset {
     path: PathBuf,
     kind: FileKind,
-    /// The CSV DuckDB reads: the original file, or the found table written out
-    /// cleanly (see [`Dataset::reader`]).
-    source: PathBuf,
-    cleaned: bool,
+    /// The CSV/TSV text the finder reads: the file, or a UTF-8 copy of it.
+    text: PathBuf,
+    /// The CSV DuckDB reads: `text`, or the found table written out cleanly
+    /// (see [`Dataset::reader`]). A load that finds bytes that aren't UTF-8
+    /// late in a big file switches it to a UTF-8 copy.
+    source: Mutex<PathBuf>,
+    /// Whether `source` is the found table written out by `scan_csv`.
+    rewritten: bool,
+    /// The CSV reader's `types` option keeping guessed dates text (see
+    /// [`Dataset::keep_guessed_dates_as_text`]), or empty.
+    text_dates: String,
+    /// The encoding the CSV/TSV text was read in; `None` for other formats.
+    encoding: Mutex<Option<Encoding>>,
+    /// Bytes of a UTF-8 file that weren't UTF-8, read as Windows-1252.
+    mended: AtomicU64,
+    /// The encoding asked for at open.
+    encoding_choice: Encoding,
+    /// The decimal mark asked for at open; see [`Dataset::reader`].
+    decimal_choice: Decimal,
+    /// The value options in effect and what the cleaner made of them.
+    clean: Mutex<(ValueOptions, Cleaning)>,
+    /// Held while [`Dataset::clean`] decides, so two decisions never overlap.
+    cleaning: Mutex<()>,
     import: Import,
     session_dir: PathBuf,
     root: Mutex<Option<Connection>>,
@@ -224,11 +261,36 @@ impl Dataset {
             quote_str(&session_dir.join("spill").to_string_lossy())
         ))?;
 
+        // Text in another encoding, or mended, is read from a UTF-8 copy.
+        let text_file = matches!(kind, FileKind::Csv | FileKind::Tsv) && !compressed(&path);
+        let decode = if text_file {
+            encoding::detect(&path, options.encoding)?
+        } else {
+            None
+        };
+        let (text, encoding, mended) = match decode {
+            Some(decode) => {
+                let copy = session_dir.join("text.csv");
+                let found = encoding::transcode(&path, decode, &copy)?;
+                let (encoding, mended) = encoding::read_as(decode, found);
+                (copy, Some(encoding), mended)
+            }
+            None => (path.clone(), text_file.then_some(Encoding::Utf8), 0),
+        };
+
         let mut dataset = Self {
-            source: path.clone(),
+            source: Mutex::new(text.clone()),
+            text,
             path,
             kind,
-            cleaned: false,
+            rewritten: false,
+            text_dates: String::new(),
+            encoding: Mutex::new(encoding),
+            mended: AtomicU64::new(mended),
+            encoding_choice: options.encoding,
+            decimal_choice: options.values.decimal,
+            clean: Mutex::new((options.values.clone(), Cleaning::default())),
+            cleaning: Mutex::new(()),
             import: Import::unscanned(),
             session_dir,
             root: Mutex::new(Some(conn)),
@@ -272,34 +334,35 @@ impl Dataset {
                         excel::load_table(&conn, &sheets[scan].1, &table, "_data")?;
                     }
                 }
-                conn.execute_batch("CREATE VIEW data AS SELECT * FROM _data")?;
+                self.clean_quietly(&conn);
             }
-            FileKind::Parquet => {
-                conn.execute_batch(&format!(
-                    "CREATE VIEW data AS SELECT * FROM read_parquet({})",
-                    quote_str(&self.path.to_string_lossy())
-                ))?;
-            }
+            FileKind::Parquet => self.clean_quietly(&conn),
             _ => {
                 if matches!(self.kind, FileKind::Csv | FileKind::Tsv) {
                     self.scan_csv(options)?;
+                    self.keep_guessed_dates_as_text(&conn);
                 }
-                // Try the strict reader first; relax it only if the preview fails.
+                // Try the strict reader first; relax it only if the first rows
+                // fail. They are kept in `_preview` for the cleaner until loaded.
                 let mut last_err = None;
-                for level in [0, 2, MAX_LEVEL] {
-                    let attempt = conn
-                        .execute_batch(&format!(
-                            "CREATE OR REPLACE VIEW data AS SELECT * FROM {}",
-                            self.reader(level)
-                        ))
-                        .and_then(|()| conn.execute_batch("SELECT * FROM data LIMIT 1000"));
+                let mut levels = [0, 2, MAX_LEVEL].into_iter().peekable();
+                while let Some(&level) = levels.peek() {
+                    let attempt = conn.execute_batch(&format!(
+                        "CREATE OR REPLACE TABLE _preview AS SELECT * FROM {} LIMIT {PREVIEW_ROWS}",
+                        self.reader(level)
+                    ));
                     match attempt {
                         Ok(()) => {
                             *self.level.lock().unwrap() = level;
                             self.note_level(level);
+                            self.clean_quietly(&conn);
                             return Ok(());
                         }
-                        Err(err) => last_err = Some(err),
+                        Err(err) if self.recode_after(&err) => {}
+                        Err(err) => {
+                            last_err = Some(err);
+                            levels.next();
+                        }
                     }
                 }
                 return Err(last_err.map_or_else(|| anyhow!("couldn't read the file"), Into::into));
@@ -313,7 +376,7 @@ impl Dataset {
     /// instead. Large or compressed files are left exactly as before.
     fn scan_csv(&mut self, options: &OpenOptions) -> Result<()> {
         let tsv = self.kind == FileKind::Tsv;
-        let Some((scan, delimiter)) = import::scan_csv(&self.path, tsv, options.delimiter)? else {
+        let Some((scan, delimiter)) = import::scan_csv(&self.text, tsv, options.delimiter)? else {
             return Ok(());
         };
         let auto = options.delimiter == Delimiter::Auto;
@@ -334,17 +397,88 @@ impl Dataset {
         if let Some(table) = table {
             let clean = self.session_dir.join("table.csv");
             import::write_csv(&scan, &table, &clean)?;
-            self.source = clean;
-            self.cleaned = true;
+            *self.source.get_mut().unwrap() = clean;
+            self.rewritten = true;
         }
         Ok(())
+    }
+
+    /// Keeps text the CSV columns DuckDB would type as dates or timestamps
+    /// from a spelling whose day/month order it guessed: any but a
+    /// four-digit year first (`2025-01-02`, `2025/01/02`,
+    /// `2025-01-05T10:00:00Z`), which DuckDB reads as it always has. The
+    /// cleaner reads the others over the whole column and says when the
+    /// order is a guess. Looks at the types DuckDB sniffs and the text of
+    /// the first rows of those columns, never the whole file. Typing at the
+    /// fallback levels, which sniff every row, is not looked at again.
+    fn keep_guessed_dates_as_text(&mut self, conn: &Connection) {
+        self.text_dates = String::new();
+        let Ok(columns) = describe(conn, &self.reader(0)) else {
+            return;
+        };
+        let dates: Vec<&Column> = columns
+            .iter()
+            .filter(|c| c.kind == ColumnKind::Temporal)
+            .collect();
+        let as_text = |columns: &[&Column]| {
+            let types: Vec<String> = columns
+                .iter()
+                .map(|c| format!("{}: 'VARCHAR'", quote_str(&c.name)))
+                .collect();
+            format!("types = {{{}}}", types.join(", "))
+        };
+        if dates.is_empty() {
+            return;
+        }
+        // Read as text, those columns' first values say how they are written.
+        // A timestamp column with no time of day in sight is dates DuckDB
+        // couldn't type as such; the cleaner reads it as dates.
+        self.text_dates = as_text(&dates);
+        let year_first: Vec<String> = dates
+            .iter()
+            .map(|c| {
+                let col = quote_ident(&c.name);
+                let check = format!(r"bool_and(regexp_matches({col}, '^\s*\d{{4}}[-/]'))");
+                if c.sql_type == "TIMESTAMP" {
+                    format!("{check} AND bool_or(contains({col}, ':'))")
+                } else {
+                    check
+                }
+            })
+            .collect();
+        let sql = format!(
+            "SELECT {} FROM (SELECT * FROM {} LIMIT {PREVIEW_ROWS})",
+            year_first.join(", "),
+            self.reader(0)
+        );
+        let read = conn.query_row(&sql, [], |row| {
+            (0..dates.len())
+                .map(|i| row.get::<_, Option<bool>>(i))
+                .collect::<duckdb::Result<Vec<_>>>()
+        });
+        self.text_dates = match read {
+            Ok(year_first) => {
+                let guessed: Vec<&Column> = dates
+                    .iter()
+                    .zip(year_first)
+                    .filter(|(_, year_first)| *year_first == Some(false))
+                    .map(|(column, _)| *column)
+                    .collect();
+                if guessed.is_empty() {
+                    String::new()
+                } else {
+                    as_text(&guessed)
+                }
+            }
+            Err(_) => String::new(),
+        };
     }
 
     /// The table function that reads the file. Higher levels trade type accuracy
     /// for tolerance: 1 sniffs the whole file, 2 also accepts ragged rows, and 3
     /// reads every column as text.
     fn reader(&self, level: u8) -> String {
-        let path = quote_str(&self.source.to_string_lossy());
+        let path = quote_str(&self.source.lock().unwrap().to_string_lossy());
         let mut options: Vec<&str> = Vec::new();
         match self.kind {
             FileKind::Json | FileKind::NdJson => {
@@ -361,11 +495,27 @@ impl Dataset {
                 format_reader("read_json", &path, &options)
             }
             _ => {
-                if self.cleaned {
+                if self.rewritten {
                     // Written by `scan_csv`: always commas, always a header line.
                     options.extend(["delim = ','", "header = true"]);
                 } else if self.kind == FileKind::Tsv {
                     options.push("delim = '\\t'");
+                }
+                // Dates DuckDB would read with a guessed day/month order, such
+                // as `03/04/2025`, stay text for the cleaner, which settles the
+                // order over the whole column instead of guessing from a sample.
+                if !self.text_dates.is_empty() {
+                    options.push(&self.text_dates);
+                }
+                // DuckDB reads `1.234` as 1.234 whatever the file's mark. With
+                // a decimal comma chosen, numbers stay text for the cleaner,
+                // which reads them that way; other types are typed as ever.
+                // (DuckDB's own `decimal_separator` and `thousands` don't check
+                // groups of three, so they would read `1.5` as 15.)
+                if self.decimal_choice == Decimal::Comma {
+                    options.push(
+                        "auto_type_candidates = ['BOOLEAN', 'DATE', 'TIME', 'TIMESTAMP', 'TIMESTAMPTZ', 'VARCHAR']",
+                    );
                 }
                 if (1..MAX_LEVEL).contains(&level) {
                     options.push("sample_size = -1");
@@ -378,6 +528,110 @@ impl Dataset {
                 }
                 format_reader("read_csv", &path, &options)
             }
+        }
+    }
+
+    /// After a read failed on bytes that aren't UTF-8 further into a file
+    /// whose start was, switches to a mended copy of it, with those bytes
+    /// read as Windows-1252, so the read can be retried. Returns whether it did.
+    fn recode_after(&self, err: &duckdb::Error) -> bool {
+        let mut encoding = self.encoding.lock().unwrap();
+        if self.encoding_choice != Encoding::Auto
+            || *encoding != Some(Encoding::Utf8)
+            || self.rewritten
+            || !err.to_string().contains("Invalid unicode")
+        {
+            return false;
+        }
+        let copy = self.session_dir.join("text.csv");
+        match encoding::transcode(&self.text, Decode::MendedUtf8, &copy) {
+            Ok(found) => {
+                let (read_as, mended) = encoding::read_as(Decode::MendedUtf8, found);
+                *self.source.lock().unwrap() = copy;
+                *encoding = Some(read_as);
+                self.mended.store(mended, Ordering::Release);
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    /// Decides how to read the values of the table `data` shows (see
+    /// [`crate::clean`]) under the value options in effect, and makes `data`
+    /// show them that way. Before a CSV/JSON file is loaded, it looks at the
+    /// first rows only; loading decides again over every row.
+    fn clean(&self, conn: &Connection) -> Result<()> {
+        // One decision at a time. `self.clean` itself is only held to copy the
+        // options out and to store the result, because the UI reads it while
+        // drawing and the whole-column check below can take seconds.
+        let _deciding = self.cleaning.lock().unwrap();
+        let values = self.clean.lock().unwrap().0.clone();
+        let from = self.base();
+        let auto = self.kind != FileKind::Parquet;
+        let check = self.check(&from);
+        let cleaning = clean::clean(conn, check, &values, auto, &|| self.delimiter_char(conn))?;
+        conn.execute_batch(&format!(
+            "CREATE OR REPLACE VIEW data AS {}",
+            cleaning.view(&from)
+        ))?;
+        self.clean.lock().unwrap().1 = cleaning;
+        Ok(())
+    }
+
+    /// The character that separates the file's fields: as the finder split
+    /// it, or for a CSV file it didn't scan, as DuckDB's sniffer reads it (a
+    /// comma when it can't). `None` for a file that isn't delimited text.
+    fn delimiter_char(&self, conn: &Connection) -> Option<char> {
+        match self.kind {
+            FileKind::Tsv => return Some('\t'),
+            FileKind::Csv => {}
+            _ => return None,
+        }
+        if let Some(delimiter) = self.import.delimiter {
+            return Some(char::from(delimiter.byte()));
+        }
+        let source = quote_str(&self.source.lock().unwrap().to_string_lossy());
+        let sniffed = conn.query_row(
+            &format!("SELECT Delimiter FROM sniff_csv({source})"),
+            [],
+            |row| row.get::<_, String>(0),
+        );
+        Some(sniffed.ok().and_then(|d| d.chars().next()).unwrap_or(','))
+    }
+
+    /// [`Dataset::clean`] for opening and loading, where a failure must not
+    /// stop the file opening: `data` then shows the table as loaded.
+    fn clean_quietly(&self, conn: &Connection) {
+        if self.clean(conn).is_err() {
+            let from = self.base();
+            let _ = conn.execute_batch(&format!(
+                "CREATE OR REPLACE VIEW data AS SELECT * FROM {from}"
+            ));
+            self.clean.lock().unwrap().1 = Cleaning::default();
+        }
+    }
+
+    /// The rows the cleaner decides on: the first rows in `_preview` before
+    /// a CSV/JSON file is loaded, else `from`, the relation `data` is made from.
+    fn check<'a>(&self, from: &'a str) -> &'a str {
+        if self.kind.needs_materialize() && !self.is_loaded() {
+            "_preview"
+        } else {
+            from
+        }
+    }
+
+    /// The relation `data` is made from: the loaded table, the Parquet
+    /// file, or the reader of a CSV/JSON file not loaded yet.
+    fn base(&self) -> String {
+        match self.kind {
+            FileKind::Parquet => {
+                format!("read_parquet({})", quote_str(&self.path.to_string_lossy()))
+            }
+            kind if kind.needs_materialize() && !self.is_loaded() => {
+                self.reader(*self.level.lock().unwrap())
+            }
+            _ => "_data".into(),
         }
     }
 
@@ -440,10 +694,80 @@ impl Dataset {
     }
 
     /// One line saying what the import did, like `Table found on lines 5 to
-    /// 45. Set aside 3 title lines, 1 total and 1 note.` `None` when the
-    /// table was simply the whole file or sheet.
-    pub fn summary(&self) -> Option<&str> {
-        self.import.summary.as_deref()
+    /// 45. Set aside 3 title lines, 1 total and 1 note. Read 2 text columns
+    /// as numbers.` It covers the encoding, the table found and the values
+    /// converted; per-column detail is in [`Dataset::conversions`]. `None`
+    /// when the file was read plainly.
+    pub fn summary(&self) -> Option<String> {
+        let encoding = match (self.encoding(), self.mended.load(Ordering::Acquire)) {
+            (Some(e @ (Encoding::Utf16 | Encoding::Windows1252)), _) => {
+                Some(format!("Read as {}, not UTF-8.", e.label()))
+            }
+            (_, 0) => None,
+            (_, 1) => Some("Read 1 byte that isn't UTF-8 as Windows-1252.".into()),
+            (_, n) => Some(format!("Read {n} bytes that aren't UTF-8 as Windows-1252.")),
+        };
+        let cleaning = self.clean.lock().unwrap().1.summary();
+        let sentences: Vec<String> = [encoding, self.import.summary.clone(), cleaning]
+            .into_iter()
+            .flatten()
+            .collect();
+        (!sentences.is_empty()).then(|| sentences.join(" "))
+    }
+
+    /// The encoding a CSV/TSV file was read in: UTF-8, UTF-16 or
+    /// Windows-1252, never `Auto`. `None` for other formats.
+    pub fn encoding(&self) -> Option<Encoding> {
+        *self.encoding.lock().unwrap()
+    }
+
+    /// The value options in effect: what was passed at open, or last set.
+    pub fn values(&self) -> ValueOptions {
+        self.clean.lock().unwrap().0.clone()
+    }
+
+    /// The decimal mark numbers were read with: the one chosen, or what
+    /// the file's numbers say. `Point` or `Comma`, never `Auto`.
+    pub fn decimal(&self) -> Decimal {
+        match self.clean.lock().unwrap().1.mark {
+            Mark::Point => Decimal::Point,
+            Mark::Comma => Decimal::Comma,
+        }
+    }
+
+    /// The columns `data` shows differently from how the file was loaded,
+    /// in column order: converted to numbers, dates or yes/no (on their own
+    /// or by the user's choice), or trimmed of spaces. Before a CSV/JSON
+    /// file is loaded, this is what its first rows say.
+    pub fn conversions(&self) -> Vec<Conversion> {
+        self.clean.lock().unwrap().1.conversions.clone()
+    }
+
+    /// Reads values under new options, such as a column's type chosen in
+    /// the column menu, without reopening the file. Returns the new
+    /// full-file frame. A file still loading keeps the options when done.
+    /// A decimal comma reaches columns DuckDB typed as numbers only when
+    /// passed at open, in [`OpenOptions::values`].
+    pub fn set_values(&self, values: &ValueOptions) -> Result<Frame> {
+        let conn = self.connection()?;
+        self.clean.lock().unwrap().0 = values.clone();
+        self.clean(&conn)?;
+        self.frame()
+    }
+
+    /// How many values of `column` would read as `read_as`, to show before
+    /// the user commits to it. Counts every row once the file is loaded,
+    /// the first rows before.
+    pub fn fit(&self, column: &str, read_as: ReadAs) -> Result<Fit> {
+        let conn = self.connection()?;
+        let from = self.base();
+        let check = self.check(&from);
+        let column = describe(&conn, check)?
+            .into_iter()
+            .find(|c| c.name == column)
+            .ok_or_else(|| anyhow!("there is no column {column}"))?;
+        let mark = self.clean.lock().unwrap().1.mark;
+        clean::fit(&conn, check, &column, read_as, mark)
     }
 
     /// Every line the open part leaves out, in file order: titles and the
@@ -476,7 +800,7 @@ impl Dataset {
             }
             _ => {
                 let tsv = self.kind == FileKind::Tsv;
-                let csv = import::csv_grid(&self.path, tsv, self.import.delimiter?).ok()??;
+                let csv = import::csv_grid(&self.text, tsv, self.import.delimiter?).ok()??;
                 (csv.grid, csv.lines)
             }
         };
@@ -500,10 +824,17 @@ impl Dataset {
         } else {
             None
         };
+        let mut columns = describe(&conn, "data")?;
+        {
+            let clean = self.clean.lock().unwrap();
+            for column in &mut columns {
+                column.format = clean.1.format(&column.name);
+            }
+        }
         Ok(Frame {
             id: self.next_id(),
             relation: "data".into(),
-            columns: describe(&conn, "data")?.into(),
+            columns: columns.into(),
             rows,
             _table: None,
         })
@@ -534,14 +865,16 @@ impl Dataset {
                 Err(_) if self.load_cancelled.load(Ordering::Acquire) => {
                     return Err(Cancelled.into());
                 }
+                Err(err) if err.downcast_ref().is_some_and(|e| self.recode_after(e)) => {}
                 Err(err) if level >= MAX_LEVEL => return Err(err),
                 Err(_) => level += 1,
             }
         }
-        conn.execute_batch("CREATE OR REPLACE VIEW data AS SELECT * FROM _data")?;
         *self.level.lock().unwrap() = level;
         self.note_level(level);
         self.loaded.store(true, Ordering::Release);
+        self.clean_quietly(&conn);
+        conn.execute_batch("DROP TABLE IF EXISTS _preview")?;
         *self.load_interrupt.lock().unwrap() = None;
         progress(1.0);
         self.frame()
@@ -572,7 +905,9 @@ impl Dataset {
                 let col = quote_ident(&c.name);
                 // Floats print with 12 significant digits: full round-trip text is
                 // long, and a truncated `5.8109…e-05` hides its exponent.
-                if is_float(&c.sql_type) {
+                if c.format.is_some() {
+                    format!("CAST({col} AS DOUBLE)")
+                } else if is_float(&c.sql_type) {
                     format!("printf('%.12g', {col})")
                 } else {
                     format!("left(CAST({col} AS VARCHAR), {MAX_CELL_CHARS})")
@@ -585,11 +920,16 @@ impl Dataset {
             frame.relation
         ))?;
         let mut rows = stmt.query([])?;
-        let width = frame.columns.len();
         while let Some(row) = rows.next()? {
             page.rows.push(
-                (0..width)
-                    .map(|i| row.get::<_, Option<String>>(i))
+                frame
+                    .columns
+                    .iter()
+                    .enumerate()
+                    .map(|(i, c)| match c.format {
+                        Some(format) => Ok(row.get::<_, Option<f64>>(i)?.map(|v| format.render(v))),
+                        None => row.get::<_, Option<String>>(i),
+                    })
                     .collect::<duckdb::Result<_>>()?,
             );
         }
@@ -793,6 +1133,12 @@ fn count(conn: &Connection, relation: &str) -> Result<u64> {
         r.get(0)
     })?;
     Ok(n as u64)
+}
+
+/// Whether DuckDB reads `path` decompressing it, going by its name.
+pub(crate) fn compressed(path: &Path) -> bool {
+    let name = path.to_string_lossy().to_ascii_lowercase();
+    name.ends_with(".gz") || name.ends_with(".zst")
 }
 
 fn is_float(sql_type: &str) -> bool {

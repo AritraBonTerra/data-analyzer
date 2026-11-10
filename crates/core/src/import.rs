@@ -61,7 +61,7 @@ pub enum Delimiter {
 }
 
 impl Delimiter {
-    fn byte(self) -> u8 {
+    pub(crate) fn byte(self) -> u8 {
         match self {
             Self::Auto | Self::Comma => b',',
             Self::Semicolon => b';',
@@ -227,11 +227,7 @@ pub(crate) struct CsvGrid {
 /// Splits a plain CSV/TSV file into a grid, as [`scan_csv`] does before
 /// running the finder. `None` for the files it leaves alone.
 pub(crate) fn csv_grid(path: &Path, tsv: bool, delimiter: Delimiter) -> Result<Option<CsvGrid>> {
-    let name = path.to_string_lossy().to_ascii_lowercase();
-    if name.ends_with(".gz")
-        || name.ends_with(".zst")
-        || std::fs::metadata(path)?.len() > SCAN_LIMIT
-    {
+    if crate::dataset::compressed(path) || std::fs::metadata(path)?.len() > SCAN_LIMIT {
         return Ok(None);
     }
     let bytes = std::fs::read(path)?;

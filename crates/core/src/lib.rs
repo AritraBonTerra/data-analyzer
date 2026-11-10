@@ -19,9 +19,24 @@
 //! lines set aside), [`Dataset::unit`] (units from a `(USD)` header row),
 //! [`Dataset::plan`] (the [`ImportPlan`] in effect, to show and edit) and
 //! [`Dataset::preview`] (the raw rows with their roles under a plan). To
-//! adjust, reopen with `OpenOptions { part, plan, delimiter, .. }`.
+//! adjust, reopen with `OpenOptions { part, plan, delimiter, encoding, .. }`.
+//!
+//! Reading values: a CSV/TSV file that isn't UTF-8 is read from a UTF-8 copy
+//! ([`Encoding`], [`Dataset::encoding`]). Once a table is loaded, a text
+//! column whose every value reads as a number (`$1,234.00`, `12.6%`,
+//! `1.424,50`), a date (`Jul 8, 2025`, `24/03/2025`) or yes/no, leaving out
+//! placeholders such as `N/A`, is shown converted in `data`; one misfit and
+//! it stays text. Converted numbers keep the file's look through
+//! [`Column::format`]. [`Dataset::conversions`] says per column what was done,
+//! and the summary says it in one line. The user's choices ([`ValueOptions`]:
+//! the decimal mark and a [`ReadAs`] per column) go in
+//! [`OpenOptions::values`], or apply to an open file with
+//! [`Dataset::set_values`]; [`Dataset::fit`] says how many values a type
+//! would read before choosing it.
 
+mod clean;
 mod dataset;
+mod encoding;
 mod excel;
 mod format;
 mod import;
@@ -29,10 +44,12 @@ mod layout;
 mod profile;
 mod sql;
 
+pub use clean::{Conversion, Decimal, Fit, Guessed, NumberFormat, ReadAs, ValueOptions};
 pub use dataset::{
     Cancelled, Column, ColumnKind, Dataset, ExportFormat, Frame, OpenOptions, Page, QueryTicket,
     SqlOutcome, clean_cache, remove_own_sessions,
 };
+pub use encoding::Encoding;
 pub use format::FileKind;
 pub use import::{Delimiter, ImportPlan, Note, Part, Preview, PreviewRow, RowRole, Rows};
 pub use profile::{Bin, ColumnSummary, Distribution, tidy_number};

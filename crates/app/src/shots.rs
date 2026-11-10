@@ -30,6 +30,8 @@ use gpui_kit::{
     WindowBounds, WindowOptions, point, px, size,
 };
 
+use da_core::ReadAs;
+
 use crate::document::{AdjustImport, Document, ToggleStats};
 use crate::recent::RecentStore;
 use crate::workspace::Workspace;
@@ -44,6 +46,11 @@ fn scenarios() -> Vec<Scenario> {
     let report_xlsx = format!("{MESSY}/20_report_title.xlsx");
     let multirow = format!("{MESSY}/06_multirow_header.csv");
     let subtotals = format!("{MESSY}/12_subtotals.csv");
+    let currency = format!("{MESSY}/03_currency_percent.csv");
+    let ids = format!("{MESSY}/10_ids_dates_flags.csv");
+    let latin1 = format!("{MESSY}/08_latin1.csv");
+    let guessed = "crates/core/tests/fixtures/ambiguous_dates.csv";
+    let guessed_times = "crates/core/tests/fixtures/ambiguous_datetimes.csv";
     vec![
         Scenario::new("clean-sales", &sales),
         Scenario::new("clean-sales-stats", &sales)
@@ -103,6 +110,74 @@ fn scenarios() -> Vec<Scenario> {
                 .update(cx, |panel, cx| panel.pick_header(7, window, cx))
         }),
         Scenario::new("adjust-import-xlsx", &report_xlsx).action(AdjustImport),
+        // Reading values the way people write them.
+        Scenario::new("currency", &currency),
+        Scenario::new("currency-details", &currency).with(details),
+        Scenario::new("currency-details-light", &currency)
+            .light()
+            .with(details),
+        Scenario::new("dates-flags", &ids),
+        Scenario::new("dates-details", &ids).with(details),
+        // `03/04/2025` and no day above 12: month first is a guess, and one
+        // click reads the column day first.
+        Scenario::new("dates-guess", guessed).with(details),
+        Scenario::new("dates-guess-flipped", guessed)
+            .with(details)
+            .with(|doc, _, cx| doc.read_column_as("placed".into(), ReadAs::DayFirstDate, cx)),
+        // Slash date-times read month first as a guess, like dates, and a
+        // `1,125` column in a semicolon file read as a decimal comma guess.
+        Scenario::new("datetime-guess", guessed_times).with(details),
+        Scenario::new("latin1", &latin1),
+        Scenario::new("european", format!("{MESSY}/02_semicolon_european.csv")),
+        Scenario::new("read-as-menu", &ids)
+            .with(|doc, _, cx| doc.open_menu_named("zip", cx))
+            .with(|doc, _, cx| read_as(doc, ReadAs::Number, cx)),
+        Scenario::new("read-as-applied", &ids)
+            .with(|doc, _, cx| doc.open_menu_named("zip", cx))
+            .with(|doc, _, cx| read_as(doc, ReadAs::Number, cx))
+            .with(|doc, _, cx| {
+                doc.filter_editor()
+                    .update(cx, |menu, cx| menu.apply_read_as(cx))
+            }),
+        Scenario::new("read-as-misfit", &currency)
+            .with(|doc, _, cx| doc.open_menu_named("region", cx))
+            .with(|doc, _, cx| read_as(doc, ReadAs::Number, cx)),
+        // Retyping a filtered column drops its filter; the sort stays.
+        Scenario::new("read-as-filtered", &currency)
+            .with(|doc, _, cx| doc.open_menu_named("revenue", cx))
+            .with(|doc, window, cx| {
+                doc.filter_editor().update(cx, |menu, cx| {
+                    menu.type_filter(">", "$1,000,000", window, cx)
+                })
+            })
+            .with(|doc, _, cx| doc.read_column_as("revenue".into(), ReadAs::Text, cx)),
+        // A type chosen on one table is forgotten after a visit to another
+        // tab: Region is text again.
+        Scenario::new("read-as-tab-switch", format!("{MESSY}/04_two_tables.csv"))
+            .with(|doc, _, cx| doc.show_part(0, cx))
+            .with(|doc, _, cx| doc.read_column_as("Region".into(), ReadAs::Number, cx))
+            .with(|doc, _, cx| doc.show_part(1, cx))
+            .with(|doc, _, cx| doc.show_part(0, cx)),
+        Scenario::new("adjust-import-encoding", &latin1).action(AdjustImport),
+        // Forcing UTF-8 on a Windows-1252 file: the screen it gets.
+        Scenario::new("encoding-utf8-forced", &latin1)
+            .action(AdjustImport)
+            .with(|doc, _, cx| {
+                doc.import_panel().update(cx, |panel, cx| {
+                    panel.set_encoding(da_core::Encoding::Utf8, cx);
+                    panel.apply(cx);
+                })
+            }),
+        Scenario::new("stats-percent", &currency)
+            .select("margin_pct")
+            .action(ToggleStats),
+        Scenario::new("filter-chip-currency", &currency)
+            .with(|doc, _, cx| doc.open_menu_named("revenue", cx))
+            .with(|doc, window, cx| {
+                doc.filter_editor().update(cx, |menu, cx| {
+                    menu.type_filter(">", "$1,000,000", window, cx)
+                })
+            }),
         Scenario::new("adjusted-applied", &subtotals)
             .action(AdjustImport)
             .with(|doc, _, cx| {
@@ -112,6 +187,17 @@ fn scenarios() -> Vec<Scenario> {
                 })
             }),
     ]
+}
+
+/// Opens the Details popover, as clicking "Details" in the strip does.
+fn details(doc: &mut Document, window: &mut Window, cx: &mut Context<Document>) {
+    doc.show_details(window, cx);
+}
+
+/// Picks a Read as choice in the open column menu.
+fn read_as(doc: &mut Document, choice: ReadAs, cx: &mut Context<Document>) {
+    doc.filter_editor()
+        .update(cx, |menu, cx| menu.pick_read_as(choice, cx));
 }
 
 /// The window size, in logical points; the image is twice this.

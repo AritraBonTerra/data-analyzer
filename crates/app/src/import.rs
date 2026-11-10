@@ -4,7 +4,9 @@
 
 use std::sync::Arc;
 
-use da_core::{Dataset, Delimiter, ImportPlan, Preview, PreviewRow, RowRole, Rows};
+use da_core::{
+    Dataset, Decimal, Delimiter, Encoding, ImportPlan, Preview, PreviewRow, RowRole, Rows,
+};
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::{ActiveTheme, Disableable, Sizable, h_flex, v_flex};
@@ -24,13 +26,22 @@ pub fn init(cx: &mut App) {
 
 #[derive(Clone, Debug)]
 pub enum ImportEvent {
-    /// Reopen the part with this plan.
-    Apply(ImportPlan),
-    /// Reopen with this delimiter and detect everything again.
-    Redetect(Delimiter),
-    /// Reopen as detected: no plan, automatic delimiter.
+    /// Reopen the part with this plan and decimal mark.
+    Apply(ImportPlan, Decimal),
+    /// Reopen with a new delimiter or encoding and detect everything again.
+    Redetect(Reading),
+    /// Reopen as detected: no plan, every choice automatic.
     Reset,
     Cancel,
+}
+
+/// The rail's choices besides the plan: how the text is split into fields
+/// and decoded (CSV/TSV only), and the decimal mark of its numbers.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Reading {
+    pub delimiter: Delimiter,
+    pub encoding: Encoding,
+    pub decimal: Decimal,
 }
 
 /// The rail's fields as the user left them, checked only when read as a plan.
@@ -40,12 +51,12 @@ struct Draft {
     header: String,
     first: String,
     last: String,
-    delimiter: Delimiter,
+    reading: Reading,
     keep_totals: bool,
 }
 
 impl Draft {
-    fn new(plan: &ImportPlan, delimiter: Delimiter) -> Self {
+    fn new(plan: &ImportPlan, reading: Reading) -> Self {
         Self {
             header: match plan.header {
                 None => "None".into(),
@@ -54,7 +65,7 @@ impl Draft {
             },
             first: plan.data.first.to_string(),
             last: plan.data.last.to_string(),
-            delimiter,
+            reading,
             keep_totals: plan.keep_totals,
         }
     }
@@ -118,8 +129,8 @@ fn number(text: &str) -> Option<usize> {
 pub struct ImportPanel {
     focus_handle: FocusHandle,
     dataset: Option<Arc<Dataset>>,
-    /// The delimiter choice the file was opened with.
-    opened_delimiter: Delimiter,
+    /// The choices the file was opened with.
+    opened: Reading,
     draft: Draft,
     header: Entity<InputState>,
     first: Entity<InputState>,
@@ -146,7 +157,7 @@ impl ImportPanel {
         Self {
             focus_handle: cx.focus_handle(),
             dataset: None,
-            opened_delimiter: Delimiter::Auto,
+            opened: Reading::default(),
             draft: Draft::default(),
             header,
             first,
@@ -160,13 +171,13 @@ impl ImportPanel {
         }
     }
 
-    /// Shows `dataset`'s open part under the plan in effect. `delimiter` is
-    /// the choice it was opened with (`Auto` unless the user picked one).
+    /// Shows `dataset`'s open part under the plan in effect. `opened` is
+    /// the choices it was opened with (`Auto` unless the user picked one).
     /// Does nothing for a file with no plan.
     pub fn open(
         &mut self,
         dataset: Arc<Dataset>,
-        delimiter: Delimiter,
+        opened: Reading,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -174,8 +185,8 @@ impl ImportPanel {
             return;
         };
         self.dataset = Some(dataset);
-        self.opened_delimiter = delimiter;
-        self.draft = Draft::new(&plan, delimiter);
+        self.opened = opened;
+        self.draft = Draft::new(&plan, opened);
         self.preview = None;
         self.previewed = None;
         self.scroll = ScrollHandle::new();
@@ -268,8 +279,33 @@ impl ImportPanel {
     }
 
     fn set_delimiter(&mut self, delimiter: Delimiter, cx: &mut Context<Self>) {
-        self.draft.delimiter = delimiter;
+        self.draft.reading.delimiter = delimiter;
         cx.notify();
+    }
+
+    pub fn set_encoding(&mut self, encoding: Encoding, cx: &mut Context<Self>) {
+        self.draft.reading.encoding = encoding;
+        cx.notify();
+    }
+
+    fn set_decimal(&mut self, decimal: Decimal, cx: &mut Context<Self>) {
+        self.draft.reading.decimal = decimal;
+        cx.notify();
+    }
+
+    /// What changed that makes Apply find the table anew, if anything:
+    /// `delimiter`, `encoding`, or both.
+    fn redetects(&self) -> Option<&'static str> {
+        let (draft, opened) = (self.draft.reading, self.opened);
+        match (
+            draft.delimiter != opened.delimiter,
+            draft.encoding != opened.encoding,
+        ) {
+            (true, true) => Some("delimiter and encoding"),
+            (true, false) => Some("delimiter"),
+            (false, true) => Some("encoding"),
+            (false, false) => None,
+        }
     }
 
     /// Redraws the roles for the draft in the background, if it is a valid
@@ -314,13 +350,14 @@ impl ImportPanel {
         cx.notify();
     }
 
-    /// Emits what Apply does: re-detect with a changed delimiter (the other
-    /// fields then don't matter), or apply the draft if it is a valid plan.
+    /// Emits what Apply does: re-detect with a changed delimiter or
+    /// encoding (the plan's fields then don't matter), or apply the draft
+    /// if it is a valid plan.
     pub fn apply(&mut self, cx: &mut Context<Self>) {
-        if self.draft.delimiter != self.opened_delimiter {
-            cx.emit(ImportEvent::Redetect(self.draft.delimiter));
+        if self.redetects().is_some() {
+            cx.emit(ImportEvent::Redetect(self.draft.reading));
         } else if let Some(Ok(plan)) = self.checked() {
-            cx.emit(ImportEvent::Apply(plan));
+            cx.emit(ImportEvent::Apply(plan, self.draft.reading.decimal));
         }
     }
 
@@ -571,12 +608,13 @@ impl ImportPanel {
         };
 
         let checked = self.checked();
-        let delimiter_changed = self.draft.delimiter != self.opened_delimiter;
-        let (hint, error) = match &checked {
-            Some(Err(message)) => (message.clone(), true),
-            _ if delimiter_changed => (
-                "The delimiter changed, so Apply reads the file again and finds the table anew."
-                    .into(),
+        let redetects = self.redetects();
+        let (hint, error) = match (&checked, redetects) {
+            (Some(Err(message)), _) => (message.clone(), true),
+            (_, Some(what)) => (
+                format!(
+                    "The {what} changed, so Apply reads the file again and finds the table anew."
+                ),
                 false,
             ),
             _ => (
@@ -587,32 +625,34 @@ impl ImportPanel {
                 false,
             ),
         };
-        // A delimiter change re-detects everything, so the other fields needn't be valid.
-        let can_apply = delimiter_changed || matches!(checked, Some(Ok(_)));
+        // Re-detecting finds everything anew, so the plan's fields needn't be valid.
+        let can_apply = redetects.is_some() || matches!(checked, Some(Ok(_)));
 
-        let actual = self
-            .dataset
-            .as_ref()
-            .and_then(|d| d.delimiter())
-            .map(delimiter_name)
-            .unwrap_or("Comma");
-        let delimiters: Vec<(Delimiter, SharedString)> = [
+        let dataset = self.dataset.as_ref();
+        let delimiters = labelled(
+            [
+                Delimiter::Comma,
+                Delimiter::Semicolon,
+                Delimiter::Tab,
+                Delimiter::Pipe,
+            ],
             Delimiter::Auto,
-            Delimiter::Comma,
-            Delimiter::Semicolon,
-            Delimiter::Tab,
-            Delimiter::Pipe,
-        ]
-        .into_iter()
-        .map(|d| {
-            let label = if d == Delimiter::Auto {
-                format!("Auto · {actual}")
-            } else {
-                delimiter_name(d).to_string()
-            };
-            (d, label.into())
-        })
-        .collect();
+            dataset.and_then(|d| d.delimiter()),
+            delimiter_name,
+        );
+        let encoding = dataset.and_then(|d| d.encoding());
+        let encodings = labelled(
+            [Encoding::Utf8, Encoding::Utf16, Encoding::Windows1252],
+            Encoding::Auto,
+            encoding,
+            Encoding::label,
+        );
+        let decimals = labelled(
+            [Decimal::Point, Decimal::Comma],
+            Decimal::Auto,
+            dataset.map(|d| d.decimal()),
+            decimal_name,
+        );
 
         v_flex()
             .w(px(STATS_WIDTH))
@@ -661,13 +701,37 @@ impl ImportPanel {
                             self.choices(
                                 "delimiter",
                                 &delimiters,
-                                self.draft.delimiter,
+                                self.draft.reading.delimiter,
                                 Self::set_delimiter,
                                 cx,
                             )
                             .into_any_element(),
                         ))
                     })
+                    .when(encoding.is_some(), |this| {
+                        this.child(field(
+                            "Encoding",
+                            self.choices(
+                                "encoding",
+                                &encodings,
+                                self.draft.reading.encoding,
+                                Self::set_encoding,
+                                cx,
+                            )
+                            .into_any_element(),
+                        ))
+                    })
+                    .child(field(
+                        "Decimal",
+                        self.choices(
+                            "decimal",
+                            &decimals,
+                            self.draft.reading.decimal,
+                            Self::set_decimal,
+                            cx,
+                        )
+                        .into_any_element(),
+                    ))
                     .child(field(
                         "Totals",
                         self.choices(
@@ -721,6 +785,33 @@ impl ImportPanel {
     }
 }
 
+/// A field's choices for the rail: `auto` first, labelled with what was
+/// detected, like `Auto · Comma` (the name's first word, leaving out an
+/// example like `1,234.56`), then each of `choices` by `name`.
+fn labelled<T: Copy, const N: usize>(
+    choices: [T; N],
+    auto: T,
+    detected: Option<T>,
+    name: fn(T) -> &'static str,
+) -> Vec<(T, SharedString)> {
+    let auto_label = match detected {
+        Some(detected) => format!("Auto · {}", name(detected).split(' ').next().unwrap_or("")),
+        None => "Auto".into(),
+    };
+    std::iter::once((auto, auto_label.into()))
+        .chain(choices.map(|c| (c, name(c).into())))
+        .collect()
+}
+
+/// The decimal mark's name, with an example, as the rail lists it.
+fn decimal_name(decimal: Decimal) -> &'static str {
+    match decimal {
+        Decimal::Auto => "Auto",
+        Decimal::Point => "Point 1,234.56",
+        Decimal::Comma => "Comma 1.234,56",
+    }
+}
+
 /// The delimiter's name, as the rail lists it.
 fn delimiter_name(delimiter: Delimiter) -> &'static str {
     match delimiter {
@@ -757,9 +848,9 @@ impl Render for ImportPanel {
 
 #[cfg(test)]
 mod tests {
-    use da_core::{Delimiter, ImportPlan, Rows};
+    use da_core::{ImportPlan, Rows};
 
-    use super::Draft;
+    use super::{Draft, Reading};
 
     fn plan(header: Option<(usize, usize)>, data: (usize, usize)) -> ImportPlan {
         ImportPlan {
@@ -779,23 +870,23 @@ mod tests {
             plan(Some((1, 3)), (4, 23)),
             plan(None, (1, 501)),
         ] {
-            let draft = Draft::new(&p, Delimiter::Auto);
+            let draft = Draft::new(&p, Reading::default());
             assert_eq!(draft.plan(501, "line"), Ok(p));
         }
         assert_eq!(
-            Draft::new(&plan(Some((1, 3)), (4, 23)), Delimiter::Auto).header,
+            Draft::new(&plan(Some((1, 3)), (4, 23)), Reading::default()).header,
             "1 to 3"
         );
     }
 
     #[test]
     fn clicking_a_row_makes_it_the_header() {
-        let mut draft = Draft::new(&plan(Some((5, 5)), (6, 45)), Delimiter::Auto);
+        let mut draft = Draft::new(&plan(Some((5, 5)), (6, 45)), Reading::default());
         draft.pick_header(2, 48);
         assert_eq!(draft.plan(48, "line"), Ok(plan(Some((2, 2)), (3, 45))));
         // At or below the end of the data, the data runs to the last line.
         for (row, from) in [(45, 46), (47, 48)] {
-            let mut draft = Draft::new(&plan(Some((5, 5)), (6, 45)), Delimiter::Auto);
+            let mut draft = Draft::new(&plan(Some((5, 5)), (6, 45)), Reading::default());
             draft.pick_header(row, 48);
             assert_eq!(
                 draft.plan(48, "line"),
@@ -803,7 +894,7 @@ mod tests {
             );
         }
         // The second table's header, clicked from the first (lines 1 to 5 of 12).
-        let mut draft = Draft::new(&plan(Some((1, 1)), (2, 5)), Delimiter::Auto);
+        let mut draft = Draft::new(&plan(Some((1, 1)), (2, 5)), Reading::default());
         draft.pick_header(7, 12);
         assert_eq!(draft.plan(12, "line"), Ok(plan(Some((7, 7)), (8, 12))));
         // The last line leaves no room for data.
@@ -820,7 +911,7 @@ mod tests {
             header: header.into(),
             first: first.into(),
             last: last.into(),
-            delimiter: Delimiter::Auto,
+            reading: Reading::default(),
             keep_totals: false,
         };
         let check = |d: Draft| d.plan(48, "line").unwrap_err();

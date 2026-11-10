@@ -1,5 +1,7 @@
 //! Text formatting helpers for counts, percentages and column widths.
 
+use da_core::NumberFormat;
+
 /// `1234567` → `1,234,567`.
 pub fn group_digits(n: u64) -> String {
     let digits = n.to_string();
@@ -27,6 +29,12 @@ pub fn percent(fraction: f64) -> String {
     } else {
         format!("{pct:.1}%")
     }
+}
+
+/// A plain number from the engine as a column with `format` shows it, like
+/// `0.126` as `12.6%`. `None` without a format, or when `value` isn't a number.
+pub fn formatted(format: Option<NumberFormat>, value: &str) -> Option<String> {
+    Some(format?.render(value.trim().parse().ok()?))
 }
 
 /// "1 row" / "2 rows".

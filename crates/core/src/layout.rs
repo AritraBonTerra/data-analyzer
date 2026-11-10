@@ -7,6 +7,8 @@
 
 use std::ops::{Range, RangeInclusive};
 
+use crate::clean::{self, Mark};
+
 /// One cell of the grid. It is empty when its text is blank.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct Cell {
@@ -46,39 +48,10 @@ impl Cell {
 
 /// Reads a number as people write it: `1234`, `-1.5`, `$1,234.00`, `12.6%`,
 /// `(4.2%)` (negative). A percentage reads as written, so `12.6%` is 12.6.
-/// Commas only count as thousands separators in groups of three.
+/// Commas only count as thousands separators in groups of three. The
+/// cleaner reads numbers by the same rules ([`clean::read_number`]).
 pub(crate) fn number(text: &str) -> Option<f64> {
-    let mut text = text.trim();
-    let negative = text.starts_with('(') && text.ends_with(')');
-    if negative {
-        text = text[1..text.len() - 1].trim();
-    }
-    let text = text.strip_suffix('%').unwrap_or(text).trim_end();
-    let (sign, text) = match text.strip_prefix('-') {
-        Some(rest) => (-1.0, rest),
-        None => (1.0, text.strip_prefix('+').unwrap_or(text)),
-    };
-    let text = text.trim_start_matches(['$', '€', '£', '¥']).trim_start();
-    if negative && sign < 0.0 || !text.starts_with(|c: char| c.is_ascii_digit() || c == '.') {
-        return None;
-    }
-    let int = text.split('.').next().unwrap_or(text);
-    if text[int.len()..].contains(',') {
-        return None;
-    }
-    if int.contains(',') {
-        let mut groups = int.split(',');
-        let first = groups.next().unwrap_or("");
-        if !(1..=3).contains(&first.len()) || groups.any(|group| group.len() != 3) {
-            return None;
-        }
-    }
-    let plain = text.replace(',', "");
-    if !plain.bytes().any(|b| b.is_ascii_digit()) {
-        return None;
-    }
-    let n: f64 = plain.parse().ok()?;
-    Some(if negative { -n } else { sign * n })
+    clean::read_number(text, Mark::Point).map(|n| n.value)
 }
 
 /// What the finder made of a grid.
@@ -667,13 +640,7 @@ const MAX_HEADER_ROWS: usize = 4;
 /// A cell that stands for a missing value: `N/A`, `-`, `TBD`, `null`, an
 /// Excel error like `#DIV/0!`. Neither a label nor a value.
 fn is_placeholder(cell: &Cell) -> bool {
-    let text = cell.text.trim().to_lowercase();
-    text.is_empty()
-        || (text.starts_with('#') && (text.ends_with(['!', '?']) || text == "#n/a"))
-        || matches!(
-            text.as_str(),
-            "n/a" | "na" | "-" | "--" | "tbd" | "null" | "none"
-        )
+    clean::is_placeholder(&cell.text)
 }
 
 /// Whether `row` is one more header row under the header rows `above`: a
