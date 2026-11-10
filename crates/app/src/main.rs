@@ -11,6 +11,8 @@ mod grid;
 mod pages;
 mod platform;
 mod recent;
+#[cfg(all(test, target_os = "macos"))]
+mod shots;
 mod sql;
 mod stats;
 mod theme;

@@ -29,6 +29,11 @@ cargo test --workspace
 cargo clippy --workspace --all-targets && cargo fmt --all
 ```
 
+Screenshots: `cargo test -p data-analyzer shots -- --ignored --nocapture` renders each
+scenario in `crates/app/src/shots.rs` to a PNG offscreen (no window, no screen-recording
+permission), into `target/shots` or `$DA_SHOTS_DIR`. `DA_SHOT=<name>` renders just one.
+Add a scenario there to look at a UI change.
+
 ## Build the app
 ```sh
 scripts/bundle.sh               # dist/Data Analyzer.app + DMG, signed with your Developer ID

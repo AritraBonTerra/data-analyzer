@@ -61,6 +61,12 @@ impl StatsPanel {
         self.frame_id
     }
 
+    /// Whether a distribution is still being computed. For the screenshot harness.
+    #[cfg(test)]
+    pub fn is_loading(&self) -> bool {
+        self.loading
+    }
+
     /// Shows `column` of `frame`, computing its distribution in the background.
     pub fn show(
         &mut self,

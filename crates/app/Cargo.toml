@@ -22,3 +22,12 @@ block2 = "0.6"
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSBundle", "NSError", "NSString", "NSURL"] }
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSWorkspace", "block2", "objc2-uniform-type-identifiers"] }
 objc2-uniform-type-identifiers = { version = "0.3", default-features = false, features = ["std", "UTType"] }
+
+# Only for the offscreen screenshot harness (`src/shots.rs`). These are the
+# GPUI crates gpui-kit already builds on; `test-support` turns on headless
+# Metal rendering and screenshots.
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+gpui-pre = { version = "=0.3.10", features = ["test-support"] }
+gpui-pre-platform = { version = "=0.3.10", features = ["test-support"] }
+gpui-pre-apple = { version = "=0.3.10", features = ["font-kit"] }
+image = { version = "0.25", default-features = false, features = ["png"] }

@@ -1625,6 +1625,48 @@ impl Document {
     }
 }
 
+/// Hooks for the screenshot harness (`crate::shots`).
+#[cfg(test)]
+impl Document {
+    /// Selects the column called `name`, as clicking one of its cells does.
+    pub(crate) fn select_column_named(&mut self, name: &str, cx: &mut Context<Self>) {
+        let col = self
+            .view
+            .as_ref()
+            .and_then(|f| f.columns.iter().position(|c| c.name == name))
+            .unwrap_or_else(|| panic!("{} has no column named {name:?}", self.name));
+        self.select_column(col, cx);
+    }
+
+    /// What the document is still waiting for, or `None` once everything it
+    /// shows has landed: the file, the full load, the profile, the visible
+    /// rows and the stats panel's chart.
+    pub(crate) fn pending_work(&self, cx: &App) -> Option<&'static str> {
+        match self.state {
+            DocState::Opening => return Some("opening the file"),
+            DocState::Failed(_) => return None,
+            DocState::Ready => {}
+        }
+        if matches!(self.load, Load::Loading(_)) {
+            return Some("loading the whole file");
+        }
+        if self.busy != Busy::Idle {
+            return Some(self.busy.label());
+        }
+        let loaded = self.dataset.as_ref().is_some_and(|d| d.is_loaded());
+        if loaded && self.profile.as_ref().map(|p| p.frame_id) != self.view.as_ref().map(|f| f.id) {
+            return Some("profiling the columns");
+        }
+        if !self.table.read(cx).delegate().visible_rows_loaded() {
+            return Some("fetching the visible rows");
+        }
+        if self.show_stats && self.stats.read(cx).is_loading() {
+            return Some("computing the stats panel");
+        }
+        None
+    }
+}
+
 /// Like [`FilterOp::describe`], with long decimals trimmed for the chip.
 fn describe_filter(op: &FilterOp) -> String {
     match op {

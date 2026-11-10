@@ -220,6 +220,18 @@ impl GridDelegate {
         }
     }
 
+    /// Whether every row the grid last reported visible has its page loaded.
+    /// For the screenshot harness.
+    #[cfg(test)]
+    pub fn visible_rows_loaded(&self) -> bool {
+        if self.rows == 0 {
+            return true;
+        }
+        let end = (self.visible.end as u64).min(self.rows);
+        end > self.visible.start as u64
+            && (self.visible.start as u64..end).all(|row| self.cache.row(row).is_some())
+    }
+
     /// Re-requests the current visible range, after the frame changed.
     pub fn refetch(&mut self, cx: &mut Context<TableState<Self>>) {
         let visible = self.visible.clone();
