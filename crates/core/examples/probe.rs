@@ -1,6 +1,8 @@
 //! Prints how da-core reads each file given on the command line, as one JSON
-//! object per line: detected columns and types, the notice, the row count and
-//! the first rows. Use it to see what the grid would show for an awkward file.
+//! object per part (table) per line: the parts found, the summary, the notes,
+//! the plan in effect, detected columns with types and units, the notice, the
+//! row count and the first rows. Use it to see what the grid would show for an
+//! awkward file. `"default": true` marks the part the app opens first.
 //!
 //! cargo run -p da-core --example probe -- messy.csv report.xlsx
 
@@ -8,50 +10,89 @@ use std::path::Path;
 
 use da_core::*;
 
-/// Rows printed per file or sheet.
+/// Rows printed per part.
 const ROWS: u64 = 12;
 
 fn main() {
     let cache_dir = std::env::temp_dir().join("da-probe-cache");
     for arg in std::env::args().skip(1) {
         let path = Path::new(&arg);
-        let sheets = match FileKind::detect(path) {
-            Some(FileKind::Excel) => sheet_names(path).map_or(1, |names| names.len().max(1)),
-            _ => 1,
+        let open = |part: Option<usize>| {
+            Dataset::open(
+                path,
+                &OpenOptions {
+                    cache_dir: cache_dir.clone(),
+                    part,
+                    ..Default::default()
+                },
+            )
         };
-        for sheet in 0..sheets {
-            let body = match probe(path, &cache_dir, sheet) {
+        let (parts, default) = match open(None) {
+            Ok(dataset) => (dataset.parts().len(), dataset.part()),
+            Err(err) => {
+                let err = json_str(&format!("{err:#}"));
+                println!("{{\"file\": {}, \"error\": {err}}}", json_str(&arg));
+                continue;
+            }
+        };
+        for part in 0..parts {
+            let body = match open(Some(part)).and_then(|dataset| probe(&dataset)) {
                 Ok(body) => body,
                 Err(err) => format!("\"error\": {}", json_str(&format!("{err:#}"))),
             };
             println!(
-                "{{\"file\": {}, \"sheet_index\": {sheet}, {body}}}",
-                json_str(&arg)
+                "{{\"file\": {}, \"part_index\": {part}, \"default\": {}, {body}}}",
+                json_str(&arg),
+                part == default
             );
         }
     }
 }
 
-/// Opens one file (or one sheet of it) the way the app does and describes the result.
-fn probe(path: &Path, cache_dir: &Path, sheet: usize) -> anyhow::Result<String> {
-    let dataset = Dataset::open(
-        path,
-        &OpenOptions {
-            cache_dir: cache_dir.to_path_buf(),
-            sheet,
-        },
-    )?;
+/// Loads an opened part the way the app does and describes the result.
+fn probe(dataset: &Dataset) -> anyhow::Result<String> {
     let frame = dataset.materialize(&|_| {})?;
     let page = dataset.fetch(&frame, 0, ROWS)?;
 
+    let opt = |text: Option<&str>| text.map_or("null".into(), json_str);
+    let parts = dataset
+        .parts()
+        .iter()
+        .map(|p| {
+            format!(
+                "{{\"label\": {}, \"rows\": {}, \"at\": {}}}",
+                json_str(&p.label),
+                p.rows.map_or("null".into(), |n| n.to_string()),
+                opt(p.at.as_deref())
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let notes = dataset
+        .notes()
+        .iter()
+        .map(|n| format!("[{}, \"{:?}\", {}]", n.row, n.role, json_str(&n.text)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let rows = |r: Rows| format!("[{}, {}]", r.first, r.last);
+    let plan = dataset.plan().map_or("null".into(), |p| {
+        format!(
+            "{{\"header\": {}, \"data\": {}, \"keep_totals\": {}, \"delimiter\": {}}}",
+            p.header.map_or("null".into(), rows),
+            rows(p.data),
+            p.keep_totals,
+            opt(dataset.delimiter().map(|d| format!("{d:?}")).as_deref())
+        )
+    });
     let columns = frame
         .columns
         .iter()
         .map(|c| {
             format!(
-                "{{\"name\": {}, \"type\": {}}}",
+                "{{\"name\": {}, \"type\": {}, \"unit\": {}}}",
                 json_str(&c.name),
-                json_str(&c.sql_type)
+                json_str(&c.sql_type),
+                opt(dataset.unit(&c.name))
             )
         })
         .collect::<Vec<_>>()
@@ -62,7 +103,7 @@ fn probe(path: &Path, cache_dir: &Path, sheet: usize) -> anyhow::Result<String> 
         .map(|row| {
             let cells = row
                 .iter()
-                .map(|cell| cell.as_deref().map_or("null".into(), json_str))
+                .map(|cell| opt(cell.as_deref()))
                 .collect::<Vec<_>>()
                 .join(", ");
             format!("[{cells}]")
@@ -70,13 +111,11 @@ fn probe(path: &Path, cache_dir: &Path, sheet: usize) -> anyhow::Result<String> 
         .collect::<Vec<_>>()
         .join(", ");
     Ok(format!(
-        "\"kind\": {}, \"sheet\": {}, \"notice\": {}, \"row_count\": {}, \"columns\": [{columns}], \"rows\": [{rows}]",
+        "\"kind\": {}, \"part\": {}, \"parts\": [{parts}], \"summary\": {}, \"notes\": [{notes}], \"plan\": {plan}, \"notice\": {}, \"row_count\": {}, \"columns\": [{columns}], \"rows\": [{rows}]",
         json_str(dataset.kind().label()),
-        dataset
-            .sheets()
-            .get(dataset.sheet())
-            .map_or("null".into(), |name| json_str(name)),
-        dataset.notice().as_deref().map_or("null".into(), json_str),
+        json_str(&dataset.parts()[dataset.part()].label),
+        opt(dataset.summary()),
+        opt(dataset.notice().as_deref()),
         frame.rows.unwrap_or(0),
     ))
 }

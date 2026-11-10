@@ -8,8 +8,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use da_core::{
-    Cancelled, Column, ColumnSummary, Dataset, Distribution, ExportFormat, Filter, FilterOp, Frame,
-    OpenOptions, SortKey, SqlOutcome, ViewSpec, tidy_number,
+    Cancelled, Column, ColumnSummary, Dataset, Delimiter, Distribution, ExportFormat, Filter,
+    FilterOp, Frame, ImportPlan, OpenOptions, Part, RowRole, SortKey, SqlOutcome, ViewSpec,
+    tidy_number,
 };
 use futures::StreamExt;
 use gpui_kit::component::button::{Button, ButtonVariants};
@@ -19,7 +20,8 @@ use gpui_kit::component::notification::Notification;
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::table::{DataTable, TableEvent, TableSelection, TableState};
 use gpui_kit::component::{
-    ActiveTheme, FocusableExt, Icon, Sizable, Size, TitleBar, WindowExt, h_flex, v_flex,
+    ActiveTheme, FocusableExt, Icon, Sizable, Size, ThemeStyled, TitleBar, WindowExt, h_flex,
+    v_flex,
 };
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
@@ -28,6 +30,7 @@ use serde::Deserialize;
 use crate::filter::{FilterEditor, FilterEvent};
 use crate::format::{group_digits, percent, plural};
 use crate::grid::{GridDelegate, GridEvent, PREVIEW_ROWS};
+use crate::import::{ImportEvent, ImportPanel};
 use crate::platform;
 use crate::sql::{QueryStatus, SqlEvent, SqlPanel};
 use crate::stats::{StatsEvent, StatsPanel};
@@ -47,7 +50,9 @@ actions!(
         CopyCell,
         CopyRow,
         GoToRow,
-        CloseGoToRow,
+        AdjustImport,
+        /// Escape: closes the "Go to row" field or the file notes.
+        Dismiss,
     ]
 );
 
@@ -86,7 +91,7 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("cmd-shift-e", Export, Some(CONTEXT)),
         KeyBinding::new("cmd-shift-k", ClearFilters, Some(CONTEXT)),
         KeyBinding::new("cmd-g", GoToRow, Some(CONTEXT)),
-        KeyBinding::new("escape", CloseGoToRow, Some(CONTEXT)),
+        KeyBinding::new("escape", Dismiss, Some(CONTEXT)),
     ]);
 }
 
@@ -158,8 +163,18 @@ pub struct Document {
     spec: ViewSpec,
     load: Load,
     notice: Option<String>,
-    sheets: Vec<String>,
-    sheet: usize,
+    /// The file's parts (tables and sheets), shown as tabs.
+    parts: Vec<Part>,
+    /// The open part, or `None` until the first open picks one.
+    part: Option<usize>,
+    /// How the user adjusted the import of the open part; `None` reads it as detected.
+    plan: Option<ImportPlan>,
+    /// The CSV delimiter the user chose; `Auto` lets the engine pick.
+    delimiter: Delimiter,
+    /// Whether the Adjust import panel has taken over the grid's place.
+    adjusting: bool,
+    /// Where the open File notes popover is anchored, if it is open.
+    notes_at: Option<Point<Pixels>>,
     busy: Busy,
     apply_generation: u64,
     /// Separate from `apply_generation`, so sorting or filtering while SQL runs
@@ -188,6 +203,7 @@ pub struct Document {
     filter_editor: Entity<FilterEditor>,
     stats: Entity<StatsPanel>,
     sql: Entity<SqlPanel>,
+    import: Entity<ImportPanel>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -213,6 +229,7 @@ impl Document {
         let filter_editor = cx.new(|cx| FilterEditor::new(window, cx));
         let stats = cx.new(|_| StatsPanel::new());
         let sql = cx.new(|cx| SqlPanel::new(window, cx));
+        let import = cx.new(|cx| ImportPanel::new(window, cx));
 
         let subscriptions = vec![
             cx.subscribe(&table, Self::on_grid_event),
@@ -222,6 +239,7 @@ impl Document {
             cx.subscribe_in(&filter_editor, window, Self::on_filter_event),
             cx.subscribe(&stats, Self::on_stats_event),
             cx.subscribe_in(&sql, window, Self::on_sql_event),
+            cx.subscribe_in(&import, window, Self::on_import_event),
         ];
 
         let mut this = Self {
@@ -237,8 +255,12 @@ impl Document {
             spec: ViewSpec::default(),
             load: Load::Done,
             notice: None,
-            sheets: Vec::new(),
-            sheet: 0,
+            parts: Vec::new(),
+            part: None,
+            plan: None,
+            delimiter: Delimiter::Auto,
+            adjusting: false,
+            notes_at: None,
             busy: Busy::Idle,
             apply_generation: 0,
             query_generation: 0,
@@ -259,9 +281,10 @@ impl Document {
             filter_editor,
             stats,
             sql,
+            import,
             _subscriptions: subscriptions,
         };
-        this.open_sheet(0, cx);
+        this.open_part(None, cx);
         this
     }
 
@@ -271,8 +294,10 @@ impl Document {
 
     // ----- opening and loading -------------------------------------------------
 
-    /// Opens (or re-opens, for another sheet) the file in the background.
-    fn open_sheet(&mut self, sheet: usize, cx: &mut Context<Self>) {
+    /// Opens (or re-opens, for another part) the file in the background,
+    /// with the user's plan and delimiter. `None` lets the engine pick the
+    /// part with the most data.
+    pub(crate) fn open_part(&mut self, part: Option<usize>, cx: &mut Context<Self>) {
         if let Some(old) = self.dataset.take() {
             old.cancel_load();
             old.cancel_query();
@@ -288,7 +313,9 @@ impl Document {
         self.profile = None;
         self.load = Load::Done;
         self.selected_column = None;
-        self.sheet = sheet;
+        self.part = part;
+        self.adjusting = false;
+        self.notes_at = None;
         self.busy = Busy::Idle;
         // Results from the old dataset's filters or queries must not land here.
         self.apply_generation += 1;
@@ -300,14 +327,18 @@ impl Document {
             table.refresh(cx);
         });
         self.stats.update(cx, |stats, cx| stats.clear(cx));
+        self.import.update(cx, |panel, cx| panel.clear(cx));
 
         let path = self.path.clone();
+        let (plan, delimiter) = (self.plan, self.delimiter);
         cx.spawn(async move |this, cx| {
             let opened = cx
                 .background_spawn(async move {
                     let options = OpenOptions {
                         cache_dir: platform::cache_dir(),
-                        sheet,
+                        part,
+                        plan,
+                        delimiter,
                     };
                     let dataset = Dataset::open(&path, &options)?;
                     let frame = dataset.frame()?;
@@ -320,8 +351,10 @@ impl Document {
                 }
                 match opened {
                     Ok((dataset, frame)) => {
-                        this.sheets = dataset.sheets().to_vec();
-                        this.sheet = dataset.sheet();
+                        this.parts = dataset.parts().to_vec();
+                        this.part = Some(dataset.part());
+                        // File > Adjust Import… follows whether there is a plan.
+                        crate::refresh_menus(cx);
                         this.notice = dataset.notice();
                         this.state = DocState::Ready;
                         this.dataset = Some(dataset.clone());
@@ -423,8 +456,8 @@ impl Document {
             "No rows match. Try loosening a filter or clearing the search."
         } else if self.source == Source::Query {
             "The query returned no rows."
-        } else if self.sheets.len() > 1 {
-            "This sheet is empty."
+        } else if self.parts.len() > 1 {
+            "This table is empty."
         } else {
             "This file has no rows."
         };
@@ -608,7 +641,10 @@ impl Document {
         cx.notify();
     }
 
-    fn close_go_to_row(&mut self, _: &CloseGoToRow, window: &mut Window, cx: &mut Context<Self>) {
+    fn dismiss(&mut self, _: &Dismiss, window: &mut Window, cx: &mut Context<Self>) {
+        if self.notes_at.take().is_some() {
+            cx.notify();
+        }
         if self.goto_open {
             self.goto_open = false;
             self.table.read(cx).focus_handle(cx).focus(window, cx);
@@ -992,6 +1028,67 @@ impl Document {
         cx.notify();
     }
 
+    // ----- adjust import -----------------------------------------------------------
+
+    /// Whether File > Adjust Import… applies: the open part has a plan to edit.
+    pub fn can_adjust_import(&self) -> bool {
+        matches!(self.state, DocState::Ready)
+            && self.dataset.as_ref().is_some_and(|d| d.plan().is_some())
+    }
+
+    /// Opens the Adjust import panel in place of the grid.
+    fn adjust_import(&mut self, _: &AdjustImport, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(dataset) = self.dataset.clone().filter(|_| self.can_adjust_import()) else {
+            return;
+        };
+        self.adjusting = true;
+        self.notes_at = None;
+        let delimiter = self.delimiter;
+        self.import
+            .update(cx, |panel, cx| panel.open(dataset, delimiter, window, cx));
+        cx.notify();
+    }
+
+    fn on_import_event(
+        &mut self,
+        _: &Entity<ImportPanel>,
+        event: &ImportEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            ImportEvent::Apply(plan) => {
+                if self.dataset.as_ref().and_then(|d| d.plan()) == Some(plan) {
+                    self.adjusting = false;
+                } else {
+                    self.plan = Some(*plan);
+                    self.open_part(self.part, cx);
+                }
+            }
+            ImportEvent::Redetect(delimiter) => {
+                self.delimiter = *delimiter;
+                self.plan = None;
+                self.open_part(None, cx);
+            }
+            ImportEvent::Reset => {
+                // Parts found with a chosen delimiter may not exist under Auto.
+                let part = if self.delimiter == Delimiter::Auto {
+                    self.part
+                } else {
+                    None
+                };
+                self.plan = None;
+                self.delimiter = Delimiter::Auto;
+                self.open_part(part, cx);
+            }
+            ImportEvent::Cancel => {
+                self.adjusting = false;
+                self.table.read(cx).focus_handle(cx).focus(window, cx);
+            }
+        }
+        cx.notify();
+    }
+
     // ----- copy and export -------------------------------------------------------
 
     fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
@@ -1240,27 +1337,36 @@ impl Document {
         )
     }
 
-    fn render_sheets(&self, cx: &mut Context<Self>) -> Option<Div> {
-        if self.sheets.len() < 2 {
+    /// Tabs for the file's parts, when it has more than one: each label with
+    /// its row count, scrolling sideways when they don't fit.
+    fn render_parts(&self, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
+        if self.parts.len() < 2 {
             return None;
         }
         let palette = theme::palette(cx);
+        let muted = cx.theme().muted_foreground;
         Some(
             h_flex()
+                .id("parts")
                 .px(px(10.))
                 .gap(px(2.))
+                .flex_shrink_0()
                 .items_end()
+                .overflow_x_scroll()
                 .bg(palette.chrome)
                 .border_b_1()
                 .border_color(cx.theme().border)
-                .children(self.sheets.iter().enumerate().map(|(ix, name)| {
-                    let selected = ix == self.sheet;
-                    div()
-                        .id(("sheet", ix))
+                .children(self.parts.iter().enumerate().map(|(ix, part)| {
+                    let selected = self.part == Some(ix);
+                    h_flex()
+                        .id(("part", ix))
+                        .flex_shrink_0()
+                        .gap(px(6.))
                         .px(px(10.))
                         .pt(px(7.))
                         .pb(px(6.))
                         .text_xs()
+                        .whitespace_nowrap()
                         .cursor_pointer()
                         .border_b_2()
                         .border_color(if selected {
@@ -1271,17 +1377,209 @@ impl Document {
                         .text_color(if selected {
                             cx.theme().foreground
                         } else {
-                            cx.theme().muted_foreground
+                            muted
                         })
                         .when(selected, |this| this.font_weight(FontWeight::MEDIUM))
                         .hover(|s| s.text_color(cx.theme().foreground))
-                        .child(SharedString::from(name.clone()))
+                        .child(SharedString::from(part.label.clone()))
+                        .when_some(part.rows, |this, rows| {
+                            this.child(
+                                div()
+                                    .font_weight(FontWeight::NORMAL)
+                                    .font_features(tabular())
+                                    .text_color(muted.opacity(0.8))
+                                    .child(SharedString::from(group_digits(rows))),
+                            )
+                        })
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            if this.sheet != ix {
-                                this.open_sheet(ix, cx);
+                            if this.part != Some(ix) {
+                                // A plan belongs to the part it was made for.
+                                this.plan = None;
+                                this.open_part(Some(ix), cx);
                             }
                         }))
                 })),
+        )
+    }
+
+    /// The quiet line saying what the import did, with its File notes and
+    /// Adjust import actions. Absent for a file read plainly.
+    fn render_import_strip(&self, cx: &mut Context<Self>) -> Option<Div> {
+        let dataset = self.dataset.as_ref()?;
+        let adjusted = self.plan.is_some() || self.delimiter != Delimiter::Auto;
+        let text = if self.adjusting {
+            "Adjusting import. The grid updates when you apply.".to_string()
+        } else {
+            strip_text(dataset.summary(), adjusted)?
+        };
+        let palette = theme::palette(cx);
+        let link = |id: &'static str, label: &'static str, cx: &mut Context<Self>| {
+            div()
+                .id(id)
+                .flex_shrink_0()
+                .text_color(palette.accent)
+                .cursor_pointer()
+                .hover(|s| s.text_color(cx.theme().foreground))
+                .child(label)
+        };
+        let show_actions = !self.adjusting;
+        Some(
+            h_flex()
+                .px(px(12.))
+                .py(px(5.))
+                .gap(px(8.))
+                .flex_shrink_0()
+                .items_center()
+                .bg(palette.accent.opacity(0.08))
+                .border_b_1()
+                .border_color(palette.accent.opacity(0.2))
+                .text_xs()
+                .text_color(cx.theme().foreground)
+                .child(
+                    Icon::empty()
+                        .path("icons/table.svg")
+                        .size(px(13.))
+                        .text_color(palette.accent)
+                        .flex_shrink_0(),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .child(SharedString::from(text)),
+                )
+                .when(show_actions && !dataset.notes().is_empty(), |this| {
+                    this.child(link("file-notes", "File notes", cx).on_click(cx.listener(
+                        |this, event: &ClickEvent, _, cx| {
+                            this.notes_at = match this.notes_at {
+                                Some(_) => None,
+                                None => Some(event.position()),
+                            };
+                            cx.notify();
+                        },
+                    )))
+                })
+                .when(show_actions && dataset.plan().is_some(), |this| {
+                    this.child(
+                        link("adjust-import", "Adjust import", cx).on_click(cx.listener(
+                            |this, _, window, cx| this.adjust_import(&AdjustImport, window, cx),
+                        )),
+                    )
+                }),
+        )
+    }
+
+    /// The File notes popover: each set-aside line with its number and role.
+    fn render_notes(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let position = self.notes_at?;
+        let notes = self.dataset.as_ref()?.notes();
+        let muted = cx.theme().muted_foreground;
+        let line = if self.dataset.as_ref()?.delimiter().is_some() {
+            "Line"
+        } else {
+            "Row"
+        };
+        let copy_text = notes
+            .iter()
+            .map(|n| format!("{}\t{}", n.row, n.text))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let rows = notes.iter().map(|note| {
+            let role = match note.role {
+                RowRole::Title => "TITLE",
+                RowRole::Total => "TOTAL",
+                _ => "NOTE",
+            };
+            h_flex()
+                .gap(px(10.))
+                .py(px(4.))
+                .items_start()
+                .child(
+                    div()
+                        .w(px(28.))
+                        .flex_shrink_0()
+                        .text_right()
+                        .font_features(tabular())
+                        .text_color(muted)
+                        .child(SharedString::from(note.row.to_string())),
+                )
+                .child(
+                    div()
+                        .w(px(40.))
+                        .flex_shrink_0()
+                        .pt(px(1.))
+                        .text_size(px(10.))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(muted.opacity(0.8))
+                        .child(role),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(SharedString::from(note.text.clone())),
+                )
+        });
+        Some(
+            deferred(
+                anchored()
+                    .position(point(position.x + px(10.), position.y + px(12.)))
+                    .anchor(Anchor::TopRight)
+                    .snap_to_window_with_margin(px(8.))
+                    .child(
+                        v_flex()
+                            .id("file-notes-popover")
+                            .occlude()
+                            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                                this.notes_at = None;
+                                cx.notify();
+                            }))
+                            .w(px(440.))
+                            .max_h(px(360.))
+                            .overflow_y_scroll()
+                            .p(px(10.))
+                            .popover_style(cx)
+                            .text_xs()
+                            .text_color(cx.theme().popover_foreground)
+                            .child(
+                                h_flex()
+                                    .pb(px(6.))
+                                    .mb(px(2.))
+                                    .gap(px(10.))
+                                    .items_center()
+                                    .border_b_1()
+                                    .border_color(cx.theme().border)
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .child("File notes"),
+                                    )
+                                    .child(div().text_color(muted).child(SharedString::from(
+                                        format!("{line}s set aside from the table"),
+                                    )))
+                                    .child(
+                                        div()
+                                            .id("copy-notes")
+                                            .text_color(theme::palette(cx).accent)
+                                            .cursor_pointer()
+                                            .hover(|s| s.text_color(cx.theme().foreground))
+                                            .child("Copy")
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                cx.write_to_clipboard(ClipboardItem::new_string(
+                                                    copy_text.clone(),
+                                                ));
+                                                this.notes_at = None;
+                                                cx.notify();
+                                            })),
+                                    ),
+                            )
+                            .children(rows),
+                    ),
+            )
+            .with_priority(2)
+            .into_any_element(),
         )
     }
 
@@ -1418,9 +1716,14 @@ impl Document {
             Source::File => self.base.as_ref().and_then(|f| f.rows),
         };
         let view_rows = self.view.as_ref().and_then(|f| f.rows);
+        let adjusting = self
+            .adjusting
+            .then(|| self.import.read(cx).status())
+            .flatten();
 
         let rows_text = match (view_rows, base_rows) {
             _ if matches!(self.state, DocState::Opening) => "Opening…".to_string(),
+            _ if adjusting.is_some() => adjusting.unwrap_or_default(),
             (Some(v), Some(b)) if v != b => format!(
                 "{} of {} rows · {}",
                 group_digits(v),
@@ -1494,8 +1797,8 @@ impl Document {
                             .hover(|s| s.text_color(cx.theme().link_hover))
                             .child("Load anyway")
                             .on_click(cx.listener(|this, _, _, cx| {
-                                let sheet = this.sheet;
-                                this.open_sheet(sheet, cx);
+                                let part = this.part;
+                                this.open_part(part, cx);
                             })),
                     )
                     .into_any_element(),
@@ -1663,7 +1966,33 @@ impl Document {
         if self.show_stats && self.stats.read(cx).is_loading() {
             return Some("computing the stats panel");
         }
+        if self.adjusting && self.import.read(cx).is_loading() {
+            return Some("previewing the import");
+        }
         None
+    }
+
+    /// The Adjust import panel, for steps that edit it as a user would.
+    pub(crate) fn import_panel(&self) -> Entity<ImportPanel> {
+        self.import.clone()
+    }
+
+    /// Opens the File notes popover, as clicking "File notes" does, anchored
+    /// below the strip's right end.
+    pub(crate) fn show_notes(&mut self, window: &Window, cx: &mut Context<Self>) {
+        let right = window.viewport_size().width - px(12.);
+        self.notes_at = Some(point(right, px(TOOLBAR_HEIGHT + 20.)));
+        cx.notify();
+    }
+}
+
+/// What the import strip says: the engine's summary, led by "Adjusted
+/// import." when the user changed how the file is read. `None` hides it.
+fn strip_text(summary: Option<&str>, adjusted: bool) -> Option<String> {
+    match (summary, adjusted) {
+        (summary, false) => summary.map(str::to_string),
+        (Some(summary), true) => Some(format!("Adjusted import. {summary}")),
+        (None, true) => Some("Adjusted import.".into()),
     }
 }
 
@@ -1735,6 +2064,7 @@ impl Render for Document {
                 .child(Spinner::new().small())
                 .child("Opening…")
                 .into_any_element(),
+            DocState::Ready if self.adjusting => self.import.clone().into_any_element(),
             DocState::Ready => h_flex()
                 .flex_1()
                 .min_h_0()
@@ -1788,7 +2118,8 @@ impl Render for Document {
             .on_action(cx.listener(Self::clear_filters))
             .on_action(cx.listener(Self::cancel_load))
             .on_action(cx.listener(Self::go_to_row))
-            .on_action(cx.listener(Self::close_go_to_row))
+            .on_action(cx.listener(Self::dismiss))
+            .on_action(cx.listener(Self::adjust_import))
             .on_action(
                 cx.listener(|this, action: &ShowFileData, _, cx| this.show_file_data(action, cx)),
             )
@@ -1797,10 +2128,31 @@ impl Render for Document {
             .text_color(cx.theme().foreground)
             .child(self.render_toolbar(cx))
             .children(self.render_notice(cx))
-            .children(self.render_sheets(cx))
+            .children(self.render_parts(cx))
+            .children(self.render_import_strip(cx))
             .children(self.render_chips(cx))
             .child(body)
             .child(self.render_status(cx))
             .children(self.render_header_menu(window, cx))
+            .children(self.render_notes(cx))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::strip_text;
+
+    #[test]
+    fn the_strip_says_when_the_import_was_adjusted() {
+        assert_eq!(strip_text(None, false), None);
+        assert_eq!(
+            strip_text(Some("Table found."), false).as_deref(),
+            Some("Table found.")
+        );
+        assert_eq!(
+            strip_text(Some("5 total rows kept in the data."), true).as_deref(),
+            Some("Adjusted import. 5 total rows kept in the data.")
+        );
+        assert_eq!(strip_text(None, true).as_deref(), Some("Adjusted import."));
     }
 }

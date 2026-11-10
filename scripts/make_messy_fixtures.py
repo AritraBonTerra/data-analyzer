@@ -362,6 +362,47 @@ sheet.write(4 + len(rows), 0, "Total")
 sheet.write(4 + len(rows), 6, round(sum(r[6] for r in rows), 2))
 book.save(out / "25_report_title.xls")
 
+# 26-28 use fixed values, so the files after them stay as they were.
+# 26: a plain table at A1 with an empty spacer column after the first.
+wb = openpyxl.Workbook()
+ws = wb.active
+ws.title = "Report"
+for row in [
+    ["Region", None, "Units", "Revenue", "Margin"],
+    ["North", None, 10, 100.5, 0.2],
+    ["South", None, 20, 200.25, 0.3],
+    ["East", None, 5, 50, 0.1],
+]:
+    ws.append(row)
+wb.save(out / "26_spacer_column.xlsx")
+
+# 27: one sheet per month, each with the same title right above its table.
+wb = openpyxl.Workbook()
+for i, month in enumerate(["Jan", "Feb", "Mar"]):
+    ws = wb.active if i == 0 else wb.create_sheet()
+    ws.title = month
+    ws.append(["Monthly Sales Report"])
+    ws.append(["Region", "Units", "Revenue"])
+    for row in [["North", 10, 100.5], ["South", 20, 200.25], ["East", 5, 50]]:
+        ws.append(row)
+wb.save(out / "27_monthly_sheets.xlsx")
+
+# 28: a title right above the header and a one-cell footer right below.
+wb = openpyxl.Workbook()
+ws = wb.active
+ws.title = "Follow ups"
+ws.append(["Customer follow-ups"])
+ws.append(["id", "customer", "amount", "Notes"])
+for row in [
+    [1, "Ada", 120.5, "Called twice, no answer."],
+    [2, "Bob", 80, None],
+    [3, "Cy", 45.25, "Asked for a refund."],
+    [4, "Di", 300, "Total satisfaction reported"],
+]:
+    ws.append(row)
+ws.append(["Prepared by support team"])
+wb.save(out / "28_title_and_footer.xlsx")
+
 # --- JSON --------------------------------------------------------------
 
 records = [

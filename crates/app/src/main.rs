@@ -8,6 +8,7 @@ mod document;
 mod filter;
 mod format;
 mod grid;
+mod import;
 mod pages;
 mod platform;
 mod recent;
@@ -28,7 +29,8 @@ use gpui_kit::*;
 use serde::Deserialize;
 
 use crate::document::{
-    ClearFilters, Export, ExportAs, ExportKind, Find, ShowFileData, ToggleSql, ToggleStats,
+    AdjustImport, ClearFilters, Export, ExportAs, ExportKind, Find, ShowFileData, ToggleSql,
+    ToggleStats,
 };
 use crate::recent::RecentStore;
 use crate::workspace::Workspace;
@@ -79,6 +81,7 @@ fn main() {
         gpui_kit::init(cx);
         filter::init(cx);
         sql::init(cx);
+        import::init(cx);
         document::init(cx);
         cx.set_app_identity(platform::BUNDLE_ID, "Data Analyzer");
         Theme::sync_system_appearance(None, cx);
@@ -281,7 +284,7 @@ pub fn refresh_menus(cx: &mut App) {
 }
 
 fn rebuild_menus(cx: &mut App) {
-    let (stats, sql) = cx
+    let (stats, sql, adjust) = cx
         .active_window()
         .and_then(|handle| {
             let windows = &cx.global::<Windows>().0;
@@ -293,9 +296,9 @@ fn rebuild_menus(cx: &mut App) {
         .and_then(|workspace| workspace.read(cx).document().cloned())
         .map(|doc| {
             let doc = doc.read(cx);
-            (doc.stats_shown(), doc.sql_shown())
+            (doc.stats_shown(), doc.sql_shown(), doc.can_adjust_import())
         })
-        .unwrap_or((false, false));
+        .unwrap_or((false, false, false));
 
     let recent: Vec<MenuItem> = cx
         .global::<RecentStore>()
@@ -342,6 +345,8 @@ fn rebuild_menus(cx: &mut App) {
             MenuItem::action("New Window", NewWindow),
             MenuItem::separator(),
             MenuItem::action("Close Window", CloseWindow),
+            MenuItem::separator(),
+            MenuItem::action("Adjust Import…", AdjustImport).disabled(!adjust),
             MenuItem::separator(),
             MenuItem::action("Export…", Export),
             MenuItem::submenu(Menu::new("Export As").items([

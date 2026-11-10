@@ -30,27 +30,87 @@ use gpui_kit::{
     WindowBounds, WindowOptions, point, px, size,
 };
 
-use crate::document::{Document, ToggleStats};
+use crate::document::{AdjustImport, Document, ToggleStats};
 use crate::recent::RecentStore;
 use crate::workspace::Workspace;
-use crate::{Windows, document, filter, sql};
+use crate::{Windows, document, filter, import, sql};
 
 const MESSY: &str = "crates/core/tests/fixtures/messy";
 
 /// The scenarios, in the order they run. Add yours here.
 fn scenarios() -> Vec<Scenario> {
     let sales = format!("{MESSY}/00_clean_sales.csv");
+    let report = format!("{MESSY}/01_report_preamble.csv");
+    let report_xlsx = format!("{MESSY}/20_report_title.xlsx");
+    let multirow = format!("{MESSY}/06_multirow_header.csv");
+    let subtotals = format!("{MESSY}/12_subtotals.csv");
     vec![
         Scenario::new("clean-sales", &sales),
         Scenario::new("clean-sales-stats", &sales)
             .select("revenue")
             .action(ToggleStats),
         Scenario::new("clean-sales-light", &sales).light(),
-        Scenario::new("report-preamble", format!("{MESSY}/01_report_preamble.csv")),
+        Scenario::new("report-preamble", &report),
+        Scenario::new("report-preamble-light", &report).light(),
+        Scenario::new("report-notes", &report).with(|doc, window, cx| doc.show_notes(window, cx)),
+        Scenario::new("report-notes-light", &report)
+            .light()
+            .with(|doc, window, cx| doc.show_notes(window, cx)),
+        Scenario::new("report-xlsx", &report_xlsx),
         Scenario::new(
-            "xlsx-two-sheets",
+            "side-by-side-parts",
+            format!("{MESSY}/22_side_by_side_tables.xlsx"),
+        ),
+        Scenario::new(
+            "cover-sheet-first",
             format!("{MESSY}/24_cover_sheet_first.xlsx"),
         ),
+        Scenario::new("merged-headers", format!("{MESSY}/21_merged_headers.xlsx")),
+        Scenario::new("multirow-header", &multirow),
+        Scenario::new("multirow-header-light", &multirow).light(),
+        Scenario::new("subtotals", &subtotals),
+        // File notes list every totals row the strip counts.
+        Scenario::new("subtotals-notes", &subtotals)
+            .with(|doc, window, cx| doc.show_notes(window, cx)),
+        Scenario::new("adjust-import-csv", &report).action(AdjustImport),
+        Scenario::new("adjust-import-light", &report)
+            .light()
+            .action(AdjustImport),
+        // Header on line 2, as a click on it does: line 1 turns title, 3 to 5 data.
+        Scenario::new("adjust-import-edited", &report)
+            .action(AdjustImport)
+            .with(|doc, window, cx| {
+                doc.import_panel()
+                    .update(cx, |panel, cx| panel.pick_header(2, window, cx))
+            }),
+        // Header on the last line: the data would end before it starts.
+        Scenario::new("adjust-import-invalid", &report)
+            .action(AdjustImport)
+            .with(|doc, window, cx| {
+                doc.import_panel()
+                    .update(cx, |panel, cx| panel.pick_header(48, window, cx))
+            }),
+        // From the first table's tab, a click on the second table's header
+        // (line 7, below the data): the data runs to the end of the file.
+        Scenario::new(
+            "adjust-import-below-data",
+            format!("{MESSY}/04_two_tables.csv"),
+        )
+        .with(|doc, _, cx| doc.open_part(Some(0), cx))
+        .action(AdjustImport)
+        .with(|doc, window, cx| {
+            doc.import_panel()
+                .update(cx, |panel, cx| panel.pick_header(7, window, cx))
+        }),
+        Scenario::new("adjust-import-xlsx", &report_xlsx).action(AdjustImport),
+        Scenario::new("adjusted-applied", &subtotals)
+            .action(AdjustImport)
+            .with(|doc, _, cx| {
+                doc.import_panel().update(cx, |panel, cx| {
+                    panel.set_keep_totals(true, cx);
+                    panel.apply(cx);
+                })
+            }),
     ]
 }
 
@@ -107,7 +167,6 @@ impl Scenario {
         self
     }
 
-    #[allow(dead_code)] // The escape hatch for features that have no step of their own yet.
     fn with(
         mut self,
         f: impl FnOnce(&mut Document, &mut Window, &mut Context<Document>) + 'static,
@@ -128,6 +187,7 @@ impl Scenario {
             gpui_kit::init(cx);
             filter::init(cx);
             sql::init(cx);
+            import::init(cx);
             document::init(cx);
             cx.set_global(Windows::default());
             // Never written: nothing in a scenario edits the recent list.

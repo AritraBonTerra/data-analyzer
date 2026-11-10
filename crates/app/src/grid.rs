@@ -151,7 +151,10 @@ impl GridDelegate {
                         .into_iter()
                         .flatten()
                         .map(|v| v.as_str());
-                    let fit = format::initial_column_width(column, extremes.map(Some));
+                    let fit = format::initial_column_width(
+                        &header_text(self.dataset.as_ref(), &column.name),
+                        extremes.map(Some),
+                    );
                     if fit > *width {
                         *width = fit;
                         widened = true;
@@ -255,7 +258,10 @@ impl GridDelegate {
                     .iter()
                     .take(200)
                     .filter_map(|row| row.get(col).map(|c| c.as_deref()));
-                format::initial_column_width(column, sample)
+                format::initial_column_width(
+                    &header_text(self.dataset.as_ref(), &column.name),
+                    sample,
+                )
             })
             .collect();
         if self.widths.len() == fitted.len() {
@@ -352,6 +358,15 @@ impl GridDelegate {
     }
 }
 
+/// A column's header as shown: its name, then its unit when the import found
+/// one, like `Sales · Revenue (USD)`.
+fn header_text(dataset: Option<&Arc<Dataset>>, name: &str) -> String {
+    match dataset.and_then(|d| d.unit(name)) {
+        Some(unit) => format!("{name} ({unit})"),
+        None => name.to_string(),
+    }
+}
+
 impl TableDelegate for GridDelegate {
     fn columns_count(&self, _: &App) -> usize {
         self.frame.as_ref().map_or(0, |f| f.columns.len() + 1)
@@ -403,7 +418,15 @@ impl TableDelegate for GridDelegate {
         let Some(column) = self.frame.as_ref().and_then(|f| f.columns.get(col)) else {
             return div().into_any_element();
         };
-        let name: SharedString = column.name.clone().into();
+        // The unit, if any, follows the name in muted ink.
+        let header = header_text(self.dataset.as_ref(), &column.name);
+        let unit_style = HighlightStyle {
+            color: Some(cx.theme().muted_foreground),
+            font_weight: Some(FontWeight::NORMAL),
+            ..Default::default()
+        };
+        let name = StyledText::new(header.clone())
+            .with_highlights([(column.name.len()..header.len(), unit_style)]);
         let is_number = column.kind == ColumnKind::Number;
         let sort = self.sort_state(&column.name);
         let multi = self.sort.len() > 1;

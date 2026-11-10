@@ -35,7 +35,7 @@ fn main() -> anyhow::Result<()> {
         &path,
         &OpenOptions {
             cache_dir,
-            sheet: 0,
+            ..Default::default()
         },
     )?;
     let preview = ds.frame()?;

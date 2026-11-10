@@ -8,6 +8,8 @@ use duckdb::{Connection, InterruptHandle};
 
 use crate::excel;
 use crate::format::FileKind;
+use crate::import::{self, Delimiter, Import, ImportPlan, Load, Note, Part, Preview, Scan};
+use crate::layout;
 use crate::sql::{ViewSpec, quote_ident, quote_str};
 
 /// Broad type families, used for alignment, filters and which chart to draw.
@@ -148,11 +150,19 @@ impl std::fmt::Display for Cancelled {
 
 impl std::error::Error for Cancelled {}
 
+#[derive(Clone, Debug, Default)]
 pub struct OpenOptions {
     /// Where per-file DuckDB scratch databases live, e.g. `~/Library/Caches/<bundle id>`.
     pub cache_dir: PathBuf,
-    /// Which spreadsheet sheet to load. Ignored for other formats.
-    pub sheet: usize,
+    /// Which part to open, an index into [`Dataset::parts`]. `None` opens the
+    /// part with the most data rows.
+    pub part: Option<usize>,
+    /// How to read the opened part, in place of what was detected. Start from
+    /// [`Dataset::plan`] and change what the user changed.
+    pub plan: Option<ImportPlan>,
+    /// The CSV/TSV delimiter. Ignored for other formats. The parts depend on
+    /// it, so a change usually goes with `part: None, plan: None`.
+    pub delimiter: Delimiter,
 }
 
 /// Longest cell text returned by [`Dataset::fetch`]; the grid can't show more anyway.
@@ -169,8 +179,11 @@ const MAX_LEVEL: u8 = 3;
 pub struct Dataset {
     path: PathBuf,
     kind: FileKind,
-    sheets: Vec<String>,
-    sheet: usize,
+    /// The CSV DuckDB reads: the original file, or the found table written out
+    /// cleanly (see [`Dataset::reader`]).
+    source: PathBuf,
+    cleaned: bool,
+    import: Import,
     session_dir: PathBuf,
     root: Mutex<Option<Connection>>,
     loaded: AtomicBool,
@@ -212,10 +225,11 @@ impl Dataset {
         ))?;
 
         let mut dataset = Self {
+            source: path.clone(),
             path,
             kind,
-            sheets: Vec::new(),
-            sheet: options.sheet,
+            cleaned: false,
+            import: Import::unscanned(),
             session_dir,
             root: Mutex::new(Some(conn)),
             loaded: AtomicBool::new(!kind.needs_materialize()),
@@ -227,21 +241,37 @@ impl Dataset {
             latest_query: AtomicU64::new(0),
             notice: Mutex::new(None),
         };
-        dataset.attach()?;
+        dataset.attach(options)?;
         Ok(dataset)
     }
 
-    /// Creates the `data` view for the file.
-    fn attach(&mut self) -> Result<()> {
+    /// Finds the part to open and creates the `data` view for it.
+    fn attach(&mut self, options: &OpenOptions) -> Result<()> {
         let conn = self.connection()?;
+        let plan = options.plan.as_ref();
         match self.kind {
             FileKind::Excel => {
-                self.sheets = excel::sheet_names(&self.path)?;
-                if self.sheets.is_empty() {
+                let sheets = excel::read_sheets(&self.path)?;
+                if sheets.is_empty() {
                     bail!("the workbook has no sheets");
                 }
-                self.sheet = self.sheet.min(self.sheets.len() - 1);
-                excel::load_sheet(&conn, &self.path, self.sheet, "_data")?;
+                let scans: Vec<Scan> = sheets
+                    .iter()
+                    .map(|(name, range)| {
+                        let whole_rows = excel::whole_sheet_rows(range);
+                        Scan::new(Some(name.clone()), excel::grid(range), whole_rows)
+                    })
+                    .collect();
+                let (import, load) = Import::new(&scans, options.part, plan, true);
+                // The grids are only for finding tables; loading reads the sheet itself.
+                drop(scans);
+                self.import = import;
+                match load {
+                    Load::Whole { scan } => excel::load_sheet(&conn, &sheets[scan].1, "_data")?,
+                    Load::Table { scan, table } => {
+                        excel::load_table(&conn, &sheets[scan].1, &table, "_data")?;
+                    }
+                }
                 conn.execute_batch("CREATE VIEW data AS SELECT * FROM _data")?;
             }
             FileKind::Parquet => {
@@ -251,6 +281,9 @@ impl Dataset {
                 ))?;
             }
             _ => {
+                if matches!(self.kind, FileKind::Csv | FileKind::Tsv) {
+                    self.scan_csv(options)?;
+                }
                 // Try the strict reader first; relax it only if the preview fails.
                 let mut last_err = None;
                 for level in [0, 2, MAX_LEVEL] {
@@ -275,11 +308,43 @@ impl Dataset {
         Ok(())
     }
 
+    /// Runs the table finder over a small plain CSV/TSV file. When the table
+    /// isn't simply the whole file, writes it out cleanly for DuckDB to read
+    /// instead. Large or compressed files are left exactly as before.
+    fn scan_csv(&mut self, options: &OpenOptions) -> Result<()> {
+        let tsv = self.kind == FileKind::Tsv;
+        let Some((scan, delimiter)) = import::scan_csv(&self.path, tsv, options.delimiter)? else {
+            return Ok(());
+        };
+        let auto = options.delimiter == Delimiter::Auto;
+        let (mut import, load) = Import::new(
+            std::slice::from_ref(&scan),
+            options.part,
+            options.plan.as_ref(),
+            auto,
+        );
+        import.delimiter = Some(delimiter);
+        self.import = import;
+        let table = match load {
+            Load::Table { table, .. } => Some(table),
+            // No table found, but the user chose a delimiter: split on it anyway.
+            Load::Whole { .. } if !auto => layout::whole(&scan.grid),
+            Load::Whole { .. } => None,
+        };
+        if let Some(table) = table {
+            let clean = self.session_dir.join("table.csv");
+            import::write_csv(&scan, &table, &clean)?;
+            self.source = clean;
+            self.cleaned = true;
+        }
+        Ok(())
+    }
+
     /// The table function that reads the file. Higher levels trade type accuracy
     /// for tolerance: 1 sniffs the whole file, 2 also accepts ragged rows, and 3
     /// reads every column as text.
     fn reader(&self, level: u8) -> String {
-        let path = quote_str(&self.path.to_string_lossy());
+        let path = quote_str(&self.source.to_string_lossy());
         let mut options: Vec<&str> = Vec::new();
         match self.kind {
             FileKind::Json | FileKind::NdJson => {
@@ -296,7 +361,10 @@ impl Dataset {
                 format_reader("read_json", &path, &options)
             }
             _ => {
-                if self.kind == FileKind::Tsv {
+                if self.cleaned {
+                    // Written by `scan_csv`: always commas, always a header line.
+                    options.extend(["delim = ','", "header = true"]);
+                } else if self.kind == FileKind::Tsv {
                     options.push("delim = '\\t'");
                 }
                 if (1..MAX_LEVEL).contains(&level) {
@@ -348,13 +416,71 @@ impl Dataset {
         self.kind
     }
 
-    /// Sheet names for spreadsheets; empty otherwise.
-    pub fn sheets(&self) -> &[String] {
-        &self.sheets
+    /// The tables in the file: one per table found on each sheet or in the
+    /// CSV, plus each sheet with no table, read whole. Always at least one.
+    pub fn parts(&self) -> &[Part] {
+        &self.import.parts
     }
 
-    pub fn sheet(&self) -> usize {
-        self.sheet
+    /// The open part, an index into [`Dataset::parts`].
+    pub fn part(&self) -> usize {
+        self.import.part
+    }
+
+    /// How the open part was read: detected, or the plan it was opened with.
+    /// `None` for files that aren't scanned (Parquet, JSON, large or
+    /// compressed CSV), where there's nothing to adjust.
+    pub fn plan(&self) -> Option<&ImportPlan> {
+        self.import.plan.as_ref()
+    }
+
+    /// The delimiter in effect for a scanned CSV/TSV file.
+    pub fn delimiter(&self) -> Option<Delimiter> {
+        self.import.delimiter
+    }
+
+    /// One line saying what the import did, like `Table found on lines 5 to
+    /// 45. Set aside 3 title lines, 1 total and 1 note.` `None` when the
+    /// table was simply the whole file or sheet.
+    pub fn summary(&self) -> Option<&str> {
+        self.import.summary.as_deref()
+    }
+
+    /// Every line the open part leaves out, in file order: titles and the
+    /// caption above it, notes below it, and totals rows wherever they sat.
+    /// Totals rows kept in the data by the plan are not listed.
+    pub fn notes(&self) -> &[Note] {
+        &self.import.notes
+    }
+
+    /// The unit a header gave `column`, like `USD` from a `(USD)` units row.
+    pub fn unit(&self, column: &str) -> Option<&str> {
+        self.import
+            .units
+            .iter()
+            .find(|(name, _)| name == column)
+            .map(|(_, unit)| unit.as_str())
+    }
+
+    /// The raw rows of the open part's file or sheet, each with its role
+    /// under `plan`, for drawing the plan over the file. `None` for files
+    /// that aren't scanned, or that can no longer be read. Reads the file or
+    /// sheet again on each call rather than keeping a copy of every cell
+    /// while it is open: it is only called while the user adjusts the import.
+    pub fn preview(&self, plan: &ImportPlan) -> Option<Preview> {
+        self.import.plan?;
+        let (grid, lines) = match self.kind {
+            FileKind::Excel => {
+                let range = excel::read_sheet(&self.path, self.import.scan).ok()?;
+                (excel::grid(&range), Vec::new())
+            }
+            _ => {
+                let tsv = self.kind == FileKind::Tsv;
+                let csv = import::csv_grid(&self.path, tsv, self.import.delimiter?).ok()??;
+                (csv.grid, csv.lines)
+            }
+        };
+        self.import.preview(&grid, &lines, plan)
     }
 
     pub fn is_loaded(&self) -> bool {
