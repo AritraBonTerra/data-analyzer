@@ -1,0 +1,971 @@
+{
+  "status": "ok",
+  "page": 1,
+  "total_pages": 4,
+  "data": [
+    {
+      "id": 1001,
+      "date": "2026-03-24",
+      "customer": {
+        "name": "Customer 0",
+        "tier": "silver",
+        "address": {
+          "city": "Pune",
+          "zip": "02134"
+        }
+      },
+      "items": [
+        {
+          "sku": "SKU-3",
+          "qty": 3
+        },
+        {
+          "sku": "SKU-1",
+          "qty": 2
+        }
+      ],
+      "total": 17.5
+    },
+    {
+      "id": 1002,
+      "date": "2026-05-18",
+      "customer": {
+        "name": "Customer 1",
+        "tier": "silver",
+        "address": {
+          "city": "Pune",
+          "zip": "02134"
+        }
+      },
+      "items": [
+        {
+          "sku": "SKU-9",
+          "qty": 4
+        },
+        {
+          "sku": "SKU-2",
+          "qty": 3
+        }
+      ],
+      "total": 38.5
+    },
+    {
+      "id": 1003,
+      "date": "2026-02-24",
+      "customer": {
+        "name": "Customer 2",
+        "tier": "silver",
+        "address": {
+          "city": "Austin",
+          "zip": "02134"
+        }
+      },
+      "items": [
+        {
+          "sku": "SKU-7",
+          "qty": 5
+        },
+        {
+          "sku": "SKU-5",
+          "qty": 1
+        },
+        {
+          "sku": "SKU-5",
+          "qty": 4
+        }
+      ],
+      "total": 7.47
+    },
+    {
+      "id": 1004,
+      "date": "2026-01-18",
+      "customer": {
+        "name": "Customer 3",
+        "tier": "gold",
+        "address": {
+          "city": "Leeds",
+          "zip": "02134"
+        }
+      },
+      "items": [
+        {
+          "sku": "SKU-5",
+          "qty": 3
+        },
+        {
+          "sku": "SKU-6",
+          "qty": 3
+        },
+        {
+          "sku": "SKU-4",
+          "qty": 1
+        }
+      ],
+      "total": 39.84
+    },
+    {
+      "id": 1005,
+      "date": "2026-05-25",
+      "customer": {
+        "name": "Customer 4",
+        "tier": "gold",
+        "address": {
+          "city": "Pune",
+          "zip": "02134"
+        }
+      },
+      "items": [
+        {
+          "sku": "SKU-7",
+          "qty": 1
+        },
+        {
+          "sku": "SKU-5",
+          "qty": 2
+        },
+        {
+          "sku": "SKU-3",
+          "qty": 1
+        }
+      ],
+      "total": 31.92
+    },
+    {
+      "id": 1006,
+      "date": "2026-05-30",
+      "customer": {
+        "name": "Customer 5",
+        "tier": "silver",
+        "address": {
+          "city": "Austin",
+          "zip": "02134"
+        }
+      },
+      "items": [
+        {
+          "sku": "SKU-6",
+          "qty": 4
+        },
+        {
+          "sku": "SKU-7",
+          "qty": 4
+        },
+        {
+          "sku": "SKU-6",
+          "qty": 3
+        }
+      ],
+      "total": 64.74
+    },
+    {
+      "id": 1007,
+      "date": "2026-05-23",
+      "customer": {
+        "name": "Customer 6",
+        "tier": "gold",
+        "address": {
+          "city": "Pune",
+          "zip": "02134"
+        }
+      },
+      "items": [
+        {
+          "sku": "SKU-9",
+          "qty": 5
+        }
+      ],
+      "total": 49.5
+    },
+    {
+      "id": 1008,
+      "date": "2026-05-19",
+      "customer": {
+        "name": "Customer 7",
+        "tier": "silver",
+        "address": {
+          "city": "Pune",
+          "zip": "02134"
+        }
+      },
+      "items": [
+        {
+          "sku": "SKU-3",
+          "qty": 2
+        },
+        {
+          "sku": "SKU-6",
+          "qty": 1
+        }
+      ],
+      "total": 34.0
+    },
+    {
+      "id": 1009,
+      "date": "2026-06-24",
+      "customer": {
+        "name": "Customer 8",
+        "tier": "silver",
+        "address": {
+          "city": "Leeds",
+          "zip": "02134"
+        }
+      },
+      "items": [
+        {
+          "sku": "SKU-1",
+          "qty": 5
+        },
+        {
+          "sku": "SKU-4",
+          "qty": 5
+        },
+        {
+          "sku": "SKU-7",
+          "qty": 4
+        }
+      ],
+      "total": 29.88
+    },
+    {
+      "id": 1010,
+      "date": "2026-01-25",
+      "customer": {
+        "name": "Customer 9",
+        "tier": "gold",
+        "address": {
+          "city": "Pune",
+          "zip": "02134"
+        }
+      },
+      "items": [
+        {
+          "sku": "SKU-5",
+          "qty": 2
+        },
+        {
+          "sku": "SKU-3",
+          "qty": 2
+        },
+        {
+          "sku": "SKU-4",
+          "qty": 5
+        }
+      ],
+      "total": 89.64
+    },
+    {
+      "id": 1011,
+      "date": "2026-02-22",
+      "customer": {
+        "name": "Customer 10",
+        "tier": "gold",
+        "address": {
+          "city": "Austin",
+          "zip": "02134"
+        }
+      },
+      "items": [
+        {
+          "sku": "SKU-7",
+          "qty": 3
+        }
+      ],
+      "total": 136.0
+    },
+    {
+      "id": 1012,
+      "date": "2026-04-30",
+      "customer": {
+        "name": "Customer 11",
+        "tier": "gold",
+        "address": {
+          "city": "Pune",
+          "zip": "02134"
+        }
+      },
+      "items": [
+        {
+          "sku": "SKU-7",
+          "qty": 5
+        },
+        {
+          "sku": "SKU-5",
+          "qty": 1
+        },
+        {
+          "sku": "SKU-9",
+          "qty": 3
+        }
+      ],
+      "total": 66.5
+    },
+    {
+      "id": 1013,
+      "date": "2026-03-05",
+      "customer": {
+        "name": "Customer 12",
+        "tier": "gold",
+        "address": {
+          "city": "Leeds",
+          "zip": "02134"
+        }
+      },
+      "items": [
+        {
+          "sku": "SKU-2",
+          "qty": 3
+        },
+        {
+          "sku": "SKU-2",
+          "qty": 3
+        }
+      ],
+      "total": 47.88
+    },
+    {
+      "id": 1014,
+      "date": "2026-03-18",
+      "customer": {
+        "name": "Customer 13",
+        "tier": "gold",
+        "address": {
+          "city": "Pune",
+          "zip": "02134"
+        }
+      },
+      "items": [
+        {
+          "sku": "SKU-2",
+          "qty": 1
+        },
+        {
+          "sku": "SKU-6",
+          "qty": 2
+        },
+        {
+          "sku": "SKU-1",
+          "qty": 4
+        }
+      ],
+      "total": 59.5
+    },
+    {
+      "id": 1015,
+      "date": "2026-03-15",
+      "customer": {
+        "name": "Customer 14",
+        "tier": "gold",
+        "address": {
+          "city": "Austin",
+          "zip": "02134"
+        }
+      },
+      "items": [
+        {
+          "sku": "SKU-9",
+          "qty": 1
+        },
+        {
+          "sku": "SKU-8",
+          "qty": 5
+        }
+      ],
+      "total": 97.11
+    },
+    {
+      "id": 1016,
+      "date": "2026-04-18",
+      "customer": {
+        "name": "Customer 15",
+        "tier": "gold",
+        "address": {
+          "city": "Leeds",
+          "zip": "02134"
+        }
+      },
+      "items": [
+        {
+          "sku": "SKU-8",
+          "qty": 1
+        },
+        {
+          "sku": "SKU-8",
+          "qty": 2
+        },
+        {
+          "sku": "SKU-5",
+          "qty": 3
+        }
+      ],
+      "total": 60.5
+    },
+    {
+      "id": 1017,
+      "date": "2026-04-18",
+      "customer": {
+        "name": "Customer 16",
+        "tier": "silver",
+        "address": {
+          "city": "Pune",
+          "zip": "02134"
+        }
+      },
+      "items": [
+        {
+          "sku": "SKU-4",
+          "qty": 2
+        },
+        {
+          "sku": "SKU-9",
+          "qty": 2
+        },
+        {
+          "sku": "SKU-5",
+          "qty": 5
+        }
+      ],
+      "total": 7.47
+    },
+    {
+      "id": 1018,
+      "date": "2026-06-27",
+      "customer": {
+        "name": "Customer 17",
+        "tier": "gold",
+        "address": {
+          "city": "Leeds",
+          "zip": "02134"
+        }
+      },
+      "items": [
+        {
+          "sku": "SKU-1",
+          "qty": 5
+        }
+      ],
+      "total": 97.75
+    },
+    {
+      "id": 1019,
+      "date": "2026-04-27",
+      "customer": {
+        "name": "Customer 18",
+        "tier": "silver",
+        "address": {
+          "city": "Austin",
+          "zip": "02134"
+        }
+      },
+      "items": [
+        {
+          "sku": "SKU-2",
+          "qty": 3
+        },
+        {
+          "sku": "SKU-2",
+          "qty": 5
+        }
+      ],
+      "total": 12.45
+    },
+    {
+      "id": 1020,
+      "date": "2026-06-28",
+      "customer": {
+        "name": "Customer 19",
+        "tier": "gold",
+        "address": {
+          "city": "Austin",
+          "zip": "02134"
+        }
+      },
+      "items": [
+        {
+          "sku": "SKU-9",
+          "qty": 5
+        },
+        {
+          "sku": "SKU-7",
+          "qty": 2
+        }
+      ],
+      "total": 12.45
+    },
+    {
+      "id": 1021,
+      "date": "2026-06-24",
+      "customer": {
+        "name": "Customer 20",
+        "tier": "gold",
+        "address": {
+          "city": "Austin",
+          "zip": "02134"
+        }
+      },
+      "items": [
+        {
+          "sku": "SKU-6",
+          "qty": 3
+        },
+        {
+          "sku": "SKU-2",
+          "qty": 4
+        },
+        {
+          "sku": "SKU-3",
+          "qty": 4
+        }
+      ],
+      "total": 159.5
+    },
+    {
+      "id": 1022,
+      "date": "2026-01-06",
+      "customer": {
+        "name": "Customer 21",
+        "tier": "silver",
+        "address": {
+          "city": "Pune",
+          "zip": "02134"
+        }
+      },
+      "items": [
+        {
+          "sku": "SKU-8",
+          "qty": 2
+        },
+        {
+          "sku": "SKU-6",
+          "qty": 5
+        },
+        {
+          "sku": "SKU-4",
+          "qty": 1
+        }
+      ],
+      "total": 165.0
+    },
+    {
+      "id": 1023,
+      "date": "2026-01-30",
+      "customer": {
+        "name": "Customer 22",
+        "tier": "silver",
+        "address": {
+          "city": "Leeds",
+          "zip": "02134"
+        }
+      },
+      "items": [
+        {
+          "sku": "SKU-4",
+          "qty": 1
+        },
+        {
+          "sku": "SKU-9",
+          "qty": 1
+        }
+      ],
+      "total": 79.68
+    },
+    {
+      "id": 1024,
+      "date": "2026-02-03",
+      "customer": {
+        "name": "Customer 23",
+        "tier": "silver",
+        "address": {
+          "city": "Leeds",
+          "zip": "02134"
+        }
+      },
+      "items": [
+        {
+          "sku": "SKU-4",
+          "qty": 3
+        },
+        {
+          "sku": "SKU-4",
+          "qty": 5
+        },
+        {
+          "sku": "SKU-5",
+          "qty": 1
+        }
+      ],
+      "total": 28.0
+    },
+    {
+      "id": 1025,
+      "date": "2026-01-21",
+      "customer": {
+        "name": "Customer 24",
+        "tier": "gold",
+        "address": {
+          "city": "Leeds",
+          "zip": "02134"
+        }
+      },
+      "items": [
+        {
+          "sku": "SKU-4",
+          "qty": 4
+        },
+        {
+          "sku": "SKU-1",
+          "qty": 5
+        }
+      ],
+      "total": 19.25
+    },
+    {
+      "id": 1026,
+      "date": "2026-03-13",
+      "customer": {
+        "name": "Customer 25",
+        "tier": "silver",
+        "address": {
+          "city": "Pune",
+          "zip": "02134"
+        }
+      },
+      "items": [
+        {
+          "sku": "SKU-3",
+          "qty": 5
+        },
+        {
+          "sku": "SKU-6",
+          "qty": 3
+        }
+      ],
+      "total": 15.75
+    },
+    {
+      "id": 1027,
+      "date": "2026-04-02",
+      "customer": {
+        "name": "Customer 26",
+        "tier": "silver",
+        "address": {
+          "city": "Leeds",
+          "zip": "02134"
+        }
+      },
+      "items": [
+        {
+          "sku": "SKU-3",
+          "qty": 3
+        }
+      ],
+      "total": 99.75
+    },
+    {
+      "id": 1028,
+      "date": "2026-02-15",
+      "customer": {
+        "name": "Customer 27",
+        "tier": "silver",
+        "address": {
+          "city": "Leeds",
+          "zip": "02134"
+        }
+      },
+      "items": [
+        {
+          "sku": "SKU-8",
+          "qty": 1
+        },
+        {
+          "sku": "SKU-6",
+          "qty": 1
+        },
+        {
+          "sku": "SKU-3",
+          "qty": 3
+        }
+      ],
+      "total": 39.9
+    },
+    {
+      "id": 1029,
+      "date": "2026-05-05",
+      "customer": {
+        "name": "Customer 28",
+        "tier": "silver",
+        "address": {
+          "city": "Austin",
+          "zip": "02134"
+        }
+      },
+      "items": [
+        {
+          "sku": "SKU-6",
+          "qty": 3
+        }
+      ],
+      "total": 151.62
+    },
+    {
+      "id": 1030,
+      "date": "2026-01-02",
+      "customer": {
+        "name": "Customer 29",
+        "tier": "silver",
+        "address": {
+          "city": "Leeds",
+          "zip": "02134"
+        }
+      },
+      "items": [
+        {
+          "sku": "SKU-9",
+          "qty": 5
+        }
+      ],
+      "total": 17.5
+    },
+    {
+      "id": 1031,
+      "date": "2026-05-25",
+      "customer": {
+        "name": "Customer 30",
+        "tier": "silver",
+        "address": {
+          "city": "Pune",
+          "zip": "02134"
+        }
+      },
+      "items": [
+        {
+          "sku": "SKU-4",
+          "qty": 3
+        },
+        {
+          "sku": "SKU-5",
+          "qty": 1
+        }
+      ],
+      "total": 83.79
+    },
+    {
+      "id": 1032,
+      "date": "2026-06-24",
+      "customer": {
+        "name": "Customer 31",
+        "tier": "gold",
+        "address": {
+          "city": "Pune",
+          "zip": "02134"
+        }
+      },
+      "items": [
+        {
+          "sku": "SKU-9",
+          "qty": 4
+        },
+        {
+          "sku": "SKU-7",
+          "qty": 2
+        }
+      ],
+      "total": 63.0
+    },
+    {
+      "id": 1033,
+      "date": "2026-04-11",
+      "customer": {
+        "name": "Customer 32",
+        "tier": "silver",
+        "address": {
+          "city": "Leeds",
+          "zip": "02134"
+        }
+      },
+      "items": [
+        {
+          "sku": "SKU-1",
+          "qty": 1
+        }
+      ],
+      "total": 12.25
+    },
+    {
+      "id": 1034,
+      "date": "2026-02-18",
+      "customer": {
+        "name": "Customer 33",
+        "tier": "gold",
+        "address": {
+          "city": "Pune",
+          "zip": "02134"
+        }
+      },
+      "items": [
+        {
+          "sku": "SKU-9",
+          "qty": 4
+        },
+        {
+          "sku": "SKU-1",
+          "qty": 1
+        },
+        {
+          "sku": "SKU-2",
+          "qty": 4
+        }
+      ],
+      "total": 19.95
+    },
+    {
+      "id": 1035,
+      "date": "2026-01-29",
+      "customer": {
+        "name": "Customer 34",
+        "tier": "gold",
+        "address": {
+          "city": "Leeds",
+          "zip": "02134"
+        }
+      },
+      "items": [
+        {
+          "sku": "SKU-9",
+          "qty": 1
+        },
+        {
+          "sku": "SKU-6",
+          "qty": 3
+        },
+        {
+          "sku": "SKU-9",
+          "qty": 4
+        }
+      ],
+      "total": 93.5
+    },
+    {
+      "id": 1036,
+      "date": "2026-01-01",
+      "customer": {
+        "name": "Customer 35",
+        "tier": "silver",
+        "address": {
+          "city": "Pune",
+          "zip": "02134"
+        }
+      },
+      "items": [
+        {
+          "sku": "SKU-1",
+          "qty": 2
+        }
+      ],
+      "total": 147.63
+    },
+    {
+      "id": 1037,
+      "date": "2026-06-07",
+      "customer": {
+        "name": "Customer 36",
+        "tier": "gold",
+        "address": {
+          "city": "Austin",
+          "zip": "02134"
+        }
+      },
+      "items": [
+        {
+          "sku": "SKU-2",
+          "qty": 1
+        },
+        {
+          "sku": "SKU-3",
+          "qty": 2
+        }
+      ],
+      "total": 4.98
+    },
+    {
+      "id": 1038,
+      "date": "2026-04-07",
+      "customer": {
+        "name": "Customer 37",
+        "tier": "silver",
+        "address": {
+          "city": "Austin",
+          "zip": "02134"
+        }
+      },
+      "items": [
+        {
+          "sku": "SKU-8",
+          "qty": 1
+        },
+        {
+          "sku": "SKU-1",
+          "qty": 4
+        },
+        {
+          "sku": "SKU-3",
+          "qty": 4
+        }
+      ],
+      "total": 55.0
+    },
+    {
+      "id": 1039,
+      "date": "2026-04-04",
+      "customer": {
+        "name": "Customer 38",
+        "tier": "gold",
+        "address": {
+          "city": "Pune",
+          "zip": "02134"
+        }
+      },
+      "items": [
+        {
+          "sku": "SKU-8",
+          "qty": 4
+        },
+        {
+          "sku": "SKU-3",
+          "qty": 1
+        },
+        {
+          "sku": "SKU-8",
+          "qty": 5
+        }
+      ],
+      "total": 77.19
+    },
+    {
+      "id": 1040,
+      "date": "2026-04-30",
+      "customer": {
+        "name": "Customer 39",
+        "tier": "silver",
+        "address": {
+          "city": "Leeds",
+          "zip": "02134"
+        }
+      },
+      "items": [
+        {
+          "sku": "SKU-4",
+          "qty": 2
+        },
+        {
+          "sku": "SKU-1",
+          "qty": 4
+        },
+        {
+          "sku": "SKU-4",
+          "qty": 1
+        }
+      ],
+      "total": 54.25
+    }
+  ]
+}
