@@ -491,9 +491,10 @@ fn xls_report_sets_aside_the_adjacent_total() {
 /// Files the finder leaves alone: their columns and row counts as before,
 /// and nothing to say about the table. The values in `02`, `03` and `10`,
 /// and the encoding of `08`, are read by the cleaner: see `read_values.rs`.
+/// The JSON and Parquet fixtures are opened as nested data: see `nested.rs`.
 #[test]
 fn out_of_scope_files_are_unchanged() {
-    let cases: [(&str, u64, &[&str]); 7] = [
+    let cases: [(&str, u64, &[&str]); 3] = [
         (
             "02_semicolon_european.csv",
             40,
@@ -524,22 +525,6 @@ fn out_of_scope_files_are_unchanged() {
             "10_ids_dates_flags.csv",
             24,
             &["zip", "phone", "sku", "signup", "active", "last_seen"],
-        ),
-        (
-            "30_api_envelope.json",
-            1,
-            &["status", "page", "total_pages", "data"],
-        ),
-        (
-            "31_nested.jsonl",
-            40,
-            &["id", "date", "customer", "items", "total"],
-        ),
-        ("32_columns_and_rows.json", 1, &["columns", "rows"]),
-        (
-            "40_nested.parquet",
-            200,
-            &["id", "customer", "scores", "amount", "seen_at", "attrs"],
         ),
     ];
     for (name, rows, names) in cases {

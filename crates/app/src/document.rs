@@ -8,8 +8,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use da_core::{
-    Cancelled, Column, ColumnSummary, Conversion, Dataset, Delimiter, Distribution, Encoding,
-    ExportFormat, FileKind, Filter, FilterOp, Frame, Guessed, ImportPlan, NumberFormat,
+    Cancelled, Column, ColumnSummary, Conversion, Dataset, Decimal, Delimiter, Distribution,
+    Encoding, ExportFormat, FileKind, Filter, FilterOp, Frame, Guessed, ImportPlan, NumberFormat,
     OpenOptions, Part, ReadAs, RowRole, SortKey, SqlOutcome, ValueOptions, ViewSpec, tidy_number,
 };
 use futures::StreamExt;
@@ -1321,16 +1321,7 @@ impl Document {
         cx: &mut Context<Self>,
     ) {
         match event {
-            ImportEvent::Apply(plan, decimal) => {
-                let same_plan = self.dataset.as_ref().and_then(|d| d.plan()) == Some(plan);
-                if same_plan && *decimal == self.choices.reading.decimal {
-                    self.adjusting = false;
-                } else {
-                    self.choices.plan = Some(*plan);
-                    self.choices.reading.decimal = *decimal;
-                    self.open_part(self.part, cx);
-                }
-            }
+            ImportEvent::Apply(plan, decimal) => self.apply_plan(*plan, *decimal, cx),
             ImportEvent::Redetect(reading) => {
                 self.choices.redetect(*reading);
                 self.open_part(None, cx);
@@ -1341,6 +1332,37 @@ impl Document {
                 self.table.read(cx).focus_handle(cx).focus(window, cx);
             }
         }
+        cx.notify();
+    }
+
+    /// Reads the open part under `plan` and `decimal`, as Apply in Adjust
+    /// import does. Nothing is reopened when neither changed.
+    fn apply_plan(&mut self, plan: ImportPlan, decimal: Decimal, cx: &mut Context<Self>) {
+        let same_plan = self.dataset.as_ref().and_then(|d| d.plan()) == Some(&plan);
+        if same_plan && decimal == self.choices.reading.decimal {
+            self.adjusting = false;
+        } else {
+            self.choices.plan = Some(plan);
+            self.choices.reading.decimal = decimal;
+            self.open_part(self.part, cx);
+        }
+    }
+
+    /// Show totals and Hide totals in the strip: the open part's plan with
+    /// totals rows kept in the data or set aside.
+    pub(crate) fn keep_totals(&mut self, keep: bool, cx: &mut Context<Self>) {
+        let Some(plan) = self.dataset.as_ref().and_then(|d| d.plan().copied()) else {
+            return;
+        };
+        let decimal = self.choices.reading.decimal;
+        self.apply_plan(
+            ImportPlan {
+                keep_totals: keep,
+                ..plan
+            },
+            decimal,
+            cx,
+        );
         cx.notify();
     }
 
@@ -1679,7 +1701,8 @@ impl Document {
     }
 
     /// The quiet line saying what the import did, with its Details, File
-    /// notes and Adjust import actions. Absent for a file read plainly.
+    /// notes, Show or Hide totals and Adjust import actions. Absent for a
+    /// file read plainly.
     fn render_import_strip(&self, cx: &mut Context<Self>) -> Option<Div> {
         let dataset = self.dataset.as_ref()?;
         let conversions = dataset.conversions();
@@ -1703,6 +1726,14 @@ impl Document {
                 .child(label)
         };
         let show_actions = !self.adjusting;
+        // Totals set aside can be shown; totals kept by choice can be hidden.
+        let totals = if dataset.notes().iter().any(|n| n.role == RowRole::Total) {
+            Some(("show-totals", "Show totals", true))
+        } else if dataset.plan().is_some_and(|p| p.keep_totals) {
+            Some(("hide-totals", "Hide totals", false))
+        } else {
+            None
+        };
         Some(
             h_flex()
                 .px(px(12.))
@@ -1753,6 +1784,14 @@ impl Document {
                         },
                     )))
                 })
+                .when_some(
+                    totals.filter(|_| show_actions),
+                    |this, (id, label, keep)| {
+                        this.child(link(id, label, cx).on_click(
+                            cx.listener(move |this, _, _, cx| this.keep_totals(keep, cx)),
+                        ))
+                    },
+                )
                 .when(show_actions && dataset.plan().is_some(), |this| {
                     this.child(
                         link("adjust-import", "Adjust import", cx).on_click(cx.listener(
@@ -1764,18 +1803,29 @@ impl Document {
     }
 
     /// The File notes popover: each set-aside line with its number and role.
+    /// For JSON, the fields beside the records, each `key: value` alone.
     fn render_notes(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let position = self.notes_at?;
-        let notes = self.dataset.as_ref()?.notes();
+        let dataset = self.dataset.as_ref()?;
+        let notes = dataset.notes();
         let muted = cx.theme().muted_foreground;
-        let line = if self.dataset.as_ref()?.delimiter().is_some() {
-            "Line"
+        let json = dataset.kind() == FileKind::Json;
+        let heading = if json {
+            "Fields set aside from the records"
+        } else if dataset.delimiter().is_some() {
+            "Lines set aside from the table"
         } else {
-            "Row"
+            "Rows set aside from the table"
         };
         let copy_text = notes
             .iter()
-            .map(|n| format!("{}\t{}", n.row, n.text))
+            .map(|n| {
+                if json {
+                    n.text.clone()
+                } else {
+                    format!("{}\t{}", n.row, n.text)
+                }
+            })
             .collect::<Vec<_>>()
             .join("\n");
         let rows = notes.iter().map(|note| {
@@ -1788,25 +1838,27 @@ impl Document {
                 .gap(px(10.))
                 .py(px(4.))
                 .items_start()
-                .child(
-                    div()
-                        .w(px(28.))
-                        .flex_shrink_0()
-                        .text_right()
-                        .font_features(tabular())
-                        .text_color(muted)
-                        .child(SharedString::from(note.row.to_string())),
-                )
-                .child(
-                    div()
-                        .w(px(40.))
-                        .flex_shrink_0()
-                        .pt(px(1.))
-                        .text_size(px(10.))
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(muted.opacity(0.8))
-                        .child(role),
-                )
+                .when(!json, |this| {
+                    this.child(
+                        div()
+                            .w(px(28.))
+                            .flex_shrink_0()
+                            .text_right()
+                            .font_features(tabular())
+                            .text_color(muted)
+                            .child(SharedString::from(note.row.to_string())),
+                    )
+                    .child(
+                        div()
+                            .w(px(40.))
+                            .flex_shrink_0()
+                            .pt(px(1.))
+                            .text_size(px(10.))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(muted.opacity(0.8))
+                            .child(role),
+                    )
+                })
                 .child(
                     div()
                         .flex_1()
@@ -1849,9 +1901,7 @@ impl Document {
                                             .font_weight(FontWeight::SEMIBOLD)
                                             .child("File notes"),
                                     )
-                                    .child(div().text_color(muted).child(SharedString::from(
-                                        format!("{line}s set aside from the table"),
-                                    )))
+                                    .child(div().text_color(muted).child(heading))
                                     .child(
                                         div()
                                             .id("copy-notes")

@@ -38,6 +38,13 @@
 //! the UI edits the spec, and [`Dataset::chart`] draws it from a frame as one
 //! grouped query (a sample for scatters), returning a [`Chart`] with series,
 //! axes, a title and footer notes. [`Chart::sql`] is its query for Show SQL.
+//!
+//! Nested data: a JSON file that is one object holding its records (an API
+//! response, say) loads those records as the rows, with the object's other
+//! plain fields as notes. Struct columns of JSON and Parquet files open into
+//! one column per field, named with dots (`customer.address.city`); lists
+//! stay in one cell, which shows how many items it holds. The summary says
+//! what was done.
 
 mod chart;
 mod clean;
@@ -47,6 +54,7 @@ mod excel;
 mod format;
 mod import;
 mod layout;
+mod nested;
 mod profile;
 mod sql;
 

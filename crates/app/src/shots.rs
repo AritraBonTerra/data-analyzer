@@ -53,6 +53,7 @@ fn scenarios() -> Vec<Scenario> {
     let guessed = "crates/core/tests/fixtures/ambiguous_dates.csv";
     let guessed_times = "crates/core/tests/fixtures/ambiguous_datetimes.csv";
     let wide = format!("{MESSY}/07_wide_months.csv");
+    let envelope = format!("{MESSY}/30_api_envelope.json");
     let months = [
         "Jan 2026", "Feb 2026", "Mar 2026", "Apr 2026", "May 2026", "Jun 2026",
     ];
@@ -354,6 +355,16 @@ fn scenarios() -> Vec<Scenario> {
                     panel.apply(cx);
                 })
             }),
+        // Totals and nested data.
+        Scenario::new("subtotals-show-totals", &subtotals),
+        // As a click on Show totals does: the 17 rows, with Hide totals.
+        Scenario::new("subtotals-shown", &subtotals).with(|doc, _, cx| doc.keep_totals(true, cx)),
+        Scenario::new("json-envelope", &envelope),
+        Scenario::new("json-notes", &envelope).with(|doc, window, cx| doc.show_notes(window, cx)),
+        Scenario::new("parquet-nested", format!("{MESSY}/40_nested.parquet")),
+        Scenario::new("json-chart", &envelope)
+            .action(ToggleChart)
+            .with(chart(ChartKind::Bar, "customer.tier", &["total"], None)),
     ]
 }
 

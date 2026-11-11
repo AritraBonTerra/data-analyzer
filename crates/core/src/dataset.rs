@@ -14,6 +14,7 @@ use crate::excel;
 use crate::format::FileKind;
 use crate::import::{self, Delimiter, Import, ImportPlan, Load, Note, Part, Preview, Scan};
 use crate::layout;
+use crate::nested::{self, Opened};
 use crate::sql::{ViewSpec, quote_ident, quote_str};
 
 /// Broad type families, used for alignment, filters and which chart to draw.
@@ -220,6 +221,9 @@ pub struct Dataset {
     clean: Mutex<(ValueOptions, Cleaning)>,
     /// Held while [`Dataset::clean`] decides, so two decisions never overlap.
     cleaning: Mutex<()>,
+    /// How struct columns open into dotted columns, decided with the
+    /// cleaning from the loaded types; `data` shows them opened.
+    opened: Mutex<Opened>,
     import: Import,
     session_dir: PathBuf,
     root: Mutex<Option<Connection>>,
@@ -293,6 +297,7 @@ impl Dataset {
             decimal_choice: options.values.decimal,
             clean: Mutex::new((options.values.clone(), Cleaning::default())),
             cleaning: Mutex::new(()),
+            opened: Mutex::new(Opened::default()),
             import: Import::unscanned(),
             session_dir,
             root: Mutex::new(Some(conn)),
@@ -344,6 +349,10 @@ impl Dataset {
                 if matches!(self.kind, FileKind::Csv | FileKind::Tsv) {
                     self.scan_csv(options)?;
                     self.keep_guessed_dates_as_text(&conn);
+                }
+                if self.unwrap_records(&conn) {
+                    self.clean_quietly(&conn);
+                    return Ok(());
                 }
                 // Try the strict reader first; relax it only if the first rows
                 // fail. They are kept in `_preview` for the cleaner until loaded.
@@ -404,6 +413,57 @@ impl Dataset {
             self.rewritten = true;
         }
         Ok(())
+    }
+
+    /// Loads a JSON file that is one object holding its records, like an
+    /// API response, as those records: the table `_data` gets one row per
+    /// record, and the object's plain fields become file notes. The object
+    /// is read whole here, as DuckDB must read it to reach the records, so
+    /// the file is loaded once open. Returns whether it did; a file that
+    /// isn't such an object, or can't be read so, is left to read as before.
+    fn unwrap_records(&mut self, conn: &Connection) -> bool {
+        if self.kind != FileKind::Json
+            || compressed(&self.path)
+            || !nested::single_object(&self.path)
+        {
+            return false;
+        }
+        // The object is one JSON value to DuckDB, which reads at most 16 MB
+        // of one by default; let it be as large as the file.
+        let source = self.source.lock().unwrap().clone();
+        let size = std::fs::metadata(&source).map_or(0, |m| m.len()) + (1 << 20);
+        let max_size = format!("maximum_object_size = {}", size.min(u32::MAX.into()));
+        let reader = format_reader(
+            "read_json",
+            &quote_str(&source.to_string_lossy()),
+            &[&max_size],
+        );
+        let unwrapped = (|| -> Result<bool> {
+            conn.execute_batch(&format!(
+                "CREATE OR REPLACE TABLE _envelope AS SELECT * FROM {reader}"
+            ))?;
+            let Some((records, count)) = nested::find_records(conn, "_envelope")? else {
+                return Ok(false);
+            };
+            let names = nested::table_names(conn, "_envelope", &records)?;
+            conn.execute_batch(&format!(
+                "CREATE OR REPLACE TABLE _data AS {}",
+                records.select("_envelope", &names)
+            ))?;
+            self.import.notes = nested::notes(conn, "_envelope")?;
+            self.import.summary = Some(records.summary(count));
+            Ok(true)
+        })();
+        let _ = conn.execute_batch("DROP TABLE IF EXISTS _envelope");
+        let unwrapped = unwrapped.unwrap_or(false);
+        if unwrapped {
+            self.loaded.store(true, Ordering::Release);
+        } else {
+            self.import.notes.clear();
+            self.import.summary = None;
+            let _ = conn.execute_batch("DROP TABLE IF EXISTS _data");
+        }
+        unwrapped
     }
 
     /// Keeps text the CSV columns DuckDB would type as dates or timestamps
@@ -569,10 +629,16 @@ impl Dataset {
         // drawing and the whole-column check below can take seconds.
         let _deciding = self.cleaning.lock().unwrap();
         let values = self.clean.lock().unwrap().0.clone();
+        // Structs open first, by the types of the rows as loaded.
+        let raw = self.raw();
+        let check_raw = self.check_raw(&raw);
+        *self.opened.lock().unwrap() = describe(conn, &check_raw)
+            .map(|columns| Opened::new(&columns))
+            .unwrap_or_default();
         let from = self.base();
+        let check = self.check();
         let auto = self.kind != FileKind::Parquet;
-        let check = self.check(&from);
-        let cleaning = clean::clean(conn, check, &values, auto, &|| self.delimiter_char(conn))?;
+        let cleaning = clean::clean(conn, &check, &values, auto, &|| self.delimiter_char(conn))?;
         conn.execute_batch(&format!(
             "CREATE OR REPLACE VIEW data AS {}",
             cleaning.view(&from)
@@ -614,19 +680,30 @@ impl Dataset {
         }
     }
 
-    /// The rows the cleaner decides on: the first rows in `_preview` before
-    /// a CSV/JSON file is loaded, else `from`, the relation `data` is made from.
-    fn check<'a>(&self, from: &'a str) -> &'a str {
+    /// The rows the cleaner decides on, structs opened: the first rows in
+    /// `_preview` before a CSV/JSON file is loaded, else [`Dataset::base`].
+    fn check(&self) -> String {
+        let opened = self.opened.lock().unwrap();
+        opened.wrap(&self.check_raw(&self.raw()))
+    }
+
+    /// [`Dataset::check`] as read, before structs are opened.
+    fn check_raw(&self, raw: &str) -> String {
         if self.kind.needs_materialize() && !self.is_loaded() {
-            "_preview"
+            "_preview".into()
         } else {
-            from
+            raw.into()
         }
     }
 
-    /// The relation `data` is made from: the loaded table, the Parquet
-    /// file, or the reader of a CSV/JSON file not loaded yet.
+    /// The relation `data` is made from, structs opened: see [`Dataset::raw`].
     fn base(&self) -> String {
+        self.opened.lock().unwrap().wrap(&self.raw())
+    }
+
+    /// The rows as read: the loaded table, the Parquet file, or the reader
+    /// of a CSV/JSON file not loaded yet.
+    fn raw(&self) -> String {
         match self.kind {
             FileKind::Parquet => {
                 format!("read_parquet({})", quote_str(&self.path.to_string_lossy()))
@@ -699,7 +776,8 @@ impl Dataset {
     /// One line saying what the import did, like `Table found on lines 5 to
     /// 45. Set aside 3 title lines, 1 total and 1 note. Read 2 text columns
     /// as numbers.` It covers the encoding, the table found and the values
-    /// converted; per-column detail is in [`Dataset::conversions`]. `None`
+    /// converted, and records unwrapped or nested fields opened; per-column
+    /// detail is in [`Dataset::conversions`]. `None`
     /// when the file was read plainly.
     pub fn summary(&self) -> Option<String> {
         let encoding = match (self.encoding(), self.mended.load(Ordering::Acquire)) {
@@ -710,8 +788,9 @@ impl Dataset {
             (_, 1) => Some("Read 1 byte that isn't UTF-8 as Windows-1252.".into()),
             (_, n) => Some(format!("Read {n} bytes that aren't UTF-8 as Windows-1252.")),
         };
+        let opened = self.opened.lock().unwrap().summary();
         let cleaning = self.clean.lock().unwrap().1.summary();
-        let sentences: Vec<String> = [encoding, self.import.summary.clone(), cleaning]
+        let sentences: Vec<String> = [encoding, self.import.summary.clone(), opened, cleaning]
             .into_iter()
             .flatten()
             .collect();
@@ -763,19 +842,19 @@ impl Dataset {
     /// the first rows before.
     pub fn fit(&self, column: &str, read_as: ReadAs) -> Result<Fit> {
         let conn = self.connection()?;
-        let from = self.base();
-        let check = self.check(&from);
-        let column = describe(&conn, check)?
+        let check = self.check();
+        let column = describe(&conn, &check)?
             .into_iter()
             .find(|c| c.name == column)
             .ok_or_else(|| anyhow!("there is no column {column}"))?;
         let mark = self.clean.lock().unwrap().1.mark;
-        clean::fit(&conn, check, &column, read_as, mark)
+        clean::fit(&conn, &check, &column, read_as, mark)
     }
 
     /// Every line the open part leaves out, in file order: titles and the
     /// caption above it, notes below it, and totals rows wherever they sat.
-    /// Totals rows kept in the data by the plan are not listed.
+    /// Totals rows kept in the data by the plan are not listed. For a JSON
+    /// object holding its records, its plain fields, like `status: ok`.
     pub fn notes(&self) -> &[Note] {
         &self.import.notes
     }
@@ -912,6 +991,12 @@ impl Dataset {
                     format!("CAST({col} AS DOUBLE)")
                 } else if is_float(&c.sql_type) {
                     format!("printf('%.12g', {col})")
+                } else if is_list(&c.sql_type) {
+                    // `2 items · [a, b]`: how many first, then the items.
+                    format!(
+                        "len({col}) || CASE len({col}) WHEN 1 THEN ' item · ' ELSE ' items · ' END \
+                         || left(CAST({col} AS VARCHAR), {MAX_CELL_CHARS})"
+                    )
                 } else {
                     format!("left(CAST({col} AS VARCHAR), {MAX_CELL_CHARS})")
                 }
@@ -1149,6 +1234,11 @@ pub(crate) fn compressed(path: &Path) -> bool {
 
 fn is_float(sql_type: &str) -> bool {
     matches!(sql_type, "FLOAT" | "DOUBLE" | "REAL" | "FLOAT4" | "FLOAT8")
+}
+
+/// Whether a DuckDB type is a list or an array, like `BIGINT[]`.
+fn is_list(sql_type: &str) -> bool {
+    sql_type.ends_with(']')
 }
 
 fn format_reader(function: &str, path: &str, options: &[&str]) -> String {

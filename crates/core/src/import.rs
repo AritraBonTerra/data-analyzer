@@ -88,11 +88,13 @@ pub enum RowRole {
 /// A line the import set aside, kept so the user can still read it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Note {
-    /// Its line (CSV) or row (spreadsheet) number, from 1.
+    /// Its line (CSV) or row (spreadsheet) number, from 1. For a JSON
+    /// file, the field's place in the object holding the records.
     pub row: usize,
-    /// [`RowRole::Title`], [`RowRole::Total`] or [`RowRole::Note`].
+    /// [`RowRole::Title`], [`RowRole::Total`] or [`RowRole::Note`]. A JSON
+    /// field beside the records is a title.
     pub role: RowRole,
-    /// The line's cells, joined by spaces.
+    /// The line's cells, joined by spaces; for a JSON field, `key: value`.
     pub text: String,
 }
 
