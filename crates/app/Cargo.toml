@@ -1,0 +1,24 @@
+[package]
+name = "data-analyzer"
+version = "0.1.0"
+edition = "2024"
+description = "A fast, native viewer for CSV, Excel, Parquet and JSON files."
+
+[[bin]]
+name = "data-analyzer"
+path = "src/main.rs"
+
+[dependencies]
+da-core = { path = "../core" }
+gpui-kit = { version = "=0.8.1", features = ["syntect"] }
+anyhow = "1"
+futures = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+percent-encoding = "2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSBundle", "NSError", "NSString", "NSURL"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSWorkspace", "block2", "objc2-uniform-type-identifiers"] }
+objc2-uniform-type-identifiers = { version = "0.3", default-features = false, features = ["std", "UTType"] }

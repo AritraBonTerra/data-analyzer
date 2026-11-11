@@ -1,0 +1,10 @@
+[package]
+name = "da-core"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+duckdb = { version = "~1.20000", features = ["bundled", "parquet", "json"] }
+calamine = "0.37"
+anyhow = "1"
+libc = "0.2"

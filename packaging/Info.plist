@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Info.plist for Data Analyzer.app. scripts/bundle.sh fills in __VERSION__ and __BUILD__.
+     Keep LSItemContentTypes in sync with DATA_FILE_TYPES in crates/app/src/platform.rs. -->
+<plist version="1.0">
+<dict>
+  <key>CFBundleName</key><string>Data Analyzer</string>
+  <key>CFBundleDisplayName</key><string>Data Analyzer</string>
+  <key>CFBundleIdentifier</key><string>dev.ari3.DataAnalyzer</string>
+  <key>CFBundleExecutable</key><string>data-analyzer</string>
+  <key>CFBundleIconFile</key><string>AppIcon</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleShortVersionString</key><string>__VERSION__</string>
+  <key>CFBundleVersion</key><string>__BUILD__</string>
+  <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+  <key>CFBundleDevelopmentRegion</key><string>en</string>
+  <key>LSMinimumSystemVersion</key><string>12.0</string>
+  <key>LSApplicationCategoryType</key><string>public.app-category.developer-tools</string>
+  <key>NSHighResolutionCapable</key><true/>
+  <key>NSSupportsAutomaticGraphicsSwitching</key><true/>
+  <key>NSHumanReadableCopyright</key><string>Free to use.</string>
+
+  <key>CFBundleDocumentTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleTypeName</key><string>Tabular Data</string>
+      <key>CFBundleTypeRole</key><string>Viewer</string>
+      <key>LSHandlerRank</key><string>Default</string>
+      <key>LSItemContentTypes</key>
+      <array>
+        <string>public.comma-separated-values-text</string>
+        <string>public.tab-separated-values-text</string>
+        <string>org.openxmlformats.spreadsheetml.sheet</string>
+        <string>com.microsoft.excel.xls</string>
+        <string>org.apache.parquet</string>
+        <string>public.json</string>
+        <string>public.ndjson</string>
+        <string>org.jsonlines.jsonl</string>
+      </array>
+    </dict>
+  </array>
+
+  <!-- Types macOS doesn't declare itself. Imported, not exported: we don't own them. -->
+  <key>UTImportedTypeDeclarations</key>
+  <array>
+    <dict>
+      <key>UTTypeIdentifier</key><string>org.apache.parquet</string>
+      <key>UTTypeDescription</key><string>Apache Parquet</string>
+      <key>UTTypeConformsTo</key><array><string>public.data</string></array>
+      <key>UTTypeTagSpecification</key>
+      <dict>
+        <key>public.filename-extension</key><array><string>parquet</string><string>pq</string></array>
+      </dict>
+    </dict>
+    <dict>
+      <key>UTTypeIdentifier</key><string>org.jsonlines.jsonl</string>
+      <key>UTTypeDescription</key><string>JSON Lines</string>
+      <key>UTTypeConformsTo</key><array><string>public.text</string><string>public.data</string></array>
+      <key>UTTypeTagSpecification</key>
+      <dict>
+        <key>public.filename-extension</key><array><string>jsonl</string></array>
+      </dict>
+    </dict>
+  </array>
+</dict>
+</plist>
