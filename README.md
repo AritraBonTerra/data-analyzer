@@ -6,13 +6,21 @@ A free, native macOS app for opening and exploring data files: CSV, TSV, Excel (
 
 ![Data Analyzer showing a 30M-row CSV with the stats panel](docs/screenshots/stats-histogram-light.png)
 
+![A report-style CSV opened with its title lines set aside](docs/screenshots/import-strip.png)
+
+![The chart panel drawing revenue by month and region](docs/screenshots/chart-line.png)
+
 ## Features
 - **Instant preview, background load.** The first rows of a CSV/JSON file show up right away while the full file loads into DuckDB, with progress and a cancel button.
 - **Virtualized grid** that scrolls through tens of millions of rows. Column headers show type, null % and a mini distribution.
 - **Sort, filter, search.** Click headers to sort (shift-click for a secondary sort). Use column menus for filters and ⌘F to search every column.
 - **Stats panel** (⌘I): summary stats, a histogram or top values, and click-to-filter.
 - **SQL** (⌘E): the file is the table `data`, and results open in the same grid.
+- **Chart panel** (⇧⌘C): bar, line, scatter or histogram of what the grid shows, picked from dropdowns, with click-to-filter.
 - **Export** the current view to CSV, Parquet or JSON Lines.
+- **Values read as written.** Text columns of `$1,234.00`, `12.6%`, `1.424,50`, mixed date spellings or Yes/No load as numbers, dates and booleans, shown the way the file wrote them; a column with one value that doesn't fit stays text. Files in Windows-1252 or UTF-16 open too.
+- **Finds the table.** Titles, notes and totals rows around a table are set aside and kept under File notes; multi-row headers are joined; two tables in one file or sheet become two tabs. One line under the toolbar says what was done, and *Adjust import* corrects a wrong guess.
+- **Nested data.** A JSON file that wraps its records opens as rows, and nested objects in JSON and Parquet open into columns like `customer.address.city`.
 - **Excel sheets** as tabs. **Default app** for data files via *Data Analyzer → Make Default for Data Files…*
 
 Measured on an M4 Pro with a 2.4 GB, 30M-row CSV (release build, warm disk): first rows in 170 ms, full load in 3.5 s, any page in about 4 ms, sort in 2.2 s, search in 1 s.
@@ -28,6 +36,11 @@ cargo run -p data-analyzer -- path/to/file.csv   # use --release for big files
 cargo test --workspace
 cargo clippy --workspace --all-targets && cargo fmt --all
 ```
+
+Screenshots: `cargo test -p data-analyzer shots -- --ignored --nocapture` renders each
+scenario in `crates/app/src/shots.rs` to a PNG offscreen (no window, no screen-recording
+permission), into `target/shots` or `$DA_SHOTS_DIR`. `DA_SHOT=<name>` renders just one.
+Add a scenario there to look at a UI change.
 
 ## Build the app
 ```sh

@@ -6,13 +6,13 @@ use std::collections::HashSet;
 use std::ops::Range;
 use std::sync::Arc;
 
-use da_core::{ColumnKind, ColumnSummary, Dataset, Distribution, Frame, SortKey};
+use da_core::{ColumnKind, ColumnSummary, Dataset, Distribution, Frame, NumberFormat, SortKey};
 use gpui_kit::component::table::{Column, TableDelegate, TableState};
 use gpui_kit::component::{ActiveTheme, Icon, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
-use crate::format::{self, percent};
+use crate::format::{self, formatted, percent};
 use crate::pages::{PAGE_SIZE, PageCache};
 use crate::theme::{self, kind_icon, tabular};
 
@@ -151,7 +151,10 @@ impl GridDelegate {
                         .into_iter()
                         .flatten()
                         .map(|v| v.as_str());
-                    let fit = format::initial_column_width(column, extremes.map(Some));
+                    let fit = format::initial_column_width(
+                        &header_text(self.dataset.as_ref(), &column.name),
+                        extremes.map(Some),
+                    );
                     if fit > *width {
                         *width = fit;
                         widened = true;
@@ -220,6 +223,18 @@ impl GridDelegate {
         }
     }
 
+    /// Whether every row the grid last reported visible has its page loaded.
+    /// For the screenshot harness.
+    #[cfg(test)]
+    pub fn visible_rows_loaded(&self) -> bool {
+        if self.rows == 0 {
+            return true;
+        }
+        let end = (self.visible.end as u64).min(self.rows);
+        end > self.visible.start as u64
+            && (self.visible.start as u64..end).all(|row| self.cache.row(row).is_some())
+    }
+
     /// Re-requests the current visible range, after the frame changed.
     pub fn refetch(&mut self, cx: &mut Context<TableState<Self>>) {
         let visible = self.visible.clone();
@@ -243,7 +258,10 @@ impl GridDelegate {
                     .iter()
                     .take(200)
                     .filter_map(|row| row.get(col).map(|c| c.as_deref()));
-                format::initial_column_width(column, sample)
+                format::initial_column_width(
+                    &header_text(self.dataset.as_ref(), &column.name),
+                    sample,
+                )
             })
             .collect();
         if self.widths.len() == fitted.len() {
@@ -262,7 +280,14 @@ impl GridDelegate {
             .map(|ix| (ix, self.sort[ix].descending))
     }
 
-    fn render_sketch(&self, sketch: &Distribution, cx: &App) -> AnyElement {
+    /// A header's small chart. `format` is the column's number format, for
+    /// the top value's label.
+    fn render_sketch(
+        &self,
+        sketch: &Distribution,
+        format: Option<NumberFormat>,
+        cx: &App,
+    ) -> AnyElement {
         let palette = theme::palette(cx);
         match sketch {
             Distribution::Histogram(bins) => {
@@ -302,7 +327,10 @@ impl GridDelegate {
                     .find(|(value, _)| value.is_some())
                     .or(values.first());
                 let label = top.map(|(value, count)| {
-                    let name = value.as_deref().unwrap_or("null");
+                    let name = match value {
+                        Some(v) => formatted(format, v).unwrap_or_else(|| v.clone()),
+                        None => "null".into(),
+                    };
                     let name: String = name.chars().take(18).collect();
                     format!("{name} {}", percent(*count as f64 / total as f64))
                 });
@@ -337,6 +365,15 @@ impl GridDelegate {
             }
             Distribution::Empty => div().into_any_element(),
         }
+    }
+}
+
+/// A column's header as shown: its name, then its unit when the import found
+/// one, like `Sales · Revenue (USD)`.
+fn header_text(dataset: Option<&Arc<Dataset>>, name: &str) -> String {
+    match dataset.and_then(|d| d.unit(name)) {
+        Some(unit) => format!("{name} ({unit})"),
+        None => name.to_string(),
     }
 }
 
@@ -391,7 +428,15 @@ impl TableDelegate for GridDelegate {
         let Some(column) = self.frame.as_ref().and_then(|f| f.columns.get(col)) else {
             return div().into_any_element();
         };
-        let name: SharedString = column.name.clone().into();
+        // The unit, if any, follows the name in muted ink.
+        let header = header_text(self.dataset.as_ref(), &column.name);
+        let unit_style = HighlightStyle {
+            color: Some(cx.theme().muted_foreground),
+            font_weight: Some(FontWeight::NORMAL),
+            ..Default::default()
+        };
+        let name = StyledText::new(header.clone())
+            .with_highlights([(column.name.len()..header.len(), unit_style)]);
         let is_number = column.kind == ColumnKind::Number;
         let sort = self.sort_state(&column.name);
         let multi = self.sort.len() > 1;
@@ -508,7 +553,7 @@ impl TableDelegate for GridDelegate {
                     .when(is_number, |this| this.flex_row_reverse())
                     .child(div().flex_1().min_w_0().when_some(
                         profile.as_ref().and_then(|p| p.sketch.as_ref()),
-                        |this, s| this.child(self.render_sketch(s, cx)),
+                        |this, s| this.child(self.render_sketch(s, column.format, cx)),
                     ))
                     .when_some(null_text, |this, text| {
                         this.child(

@@ -73,6 +73,11 @@ impl SqlPanel {
         self.editor.update(cx, |e, cx| e.focus(window, cx));
     }
 
+    /// Puts `sql` in the editor without running it, as Show SQL does.
+    pub fn set_query(&mut self, sql: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.editor.update(cx, |e, cx| e.set_value(sql, window, cx));
+    }
+
     pub fn set_status(&mut self, status: QueryStatus, cx: &mut Context<Self>) {
         self.status = status;
         cx.notify();

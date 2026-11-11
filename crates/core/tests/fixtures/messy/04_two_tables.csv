@@ -1,0 +1,12 @@
+Region,Orders,Revenue
+North,287,87317
+South,371,22323
+East,191,28120
+West,65,53048
+
+Product,SKU,Units Sold,Returns,Return Rate
+Oat Milk 1L,SKU-0000,3078,52,0.10%
+Cold Brew 330ml,SKU-0001,3989,31,4.00%
+Granola 500g,SKU-0002,3481,45,3.62%
+Protein Bar,SKU-0003,1000,23,1.17%
+Kombucha 400ml,SKU-0004,2419,77,2.94%

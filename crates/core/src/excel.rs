@@ -1,55 +1,156 @@
-//! Reads a spreadsheet sheet with calamine and loads it into a DuckDB table.
+//! Reads spreadsheet sheets with calamine, turns them into grids for the table
+//! finder, and loads a found table (or a whole sheet) into a DuckDB table.
 //!
 //! We avoid DuckDB's Excel extension: it is downloaded at runtime, can't read
 //! `.xls`, and infers types from the first data row only.
 
 use std::path::Path;
 
-use anyhow::{Context as _, Result, anyhow};
-use calamine::{Data, Reader as _, open_workbook_auto};
+use anyhow::{Context as _, Result};
+use calamine::{Data, Range, Reader as _, open_workbook_auto};
 use duckdb::types::{TimeUnit, Value};
 use duckdb::{Connection, appender_params_from_iter};
 
+use crate::layout::{Cell, Table, unique_names};
 use crate::sql::quote_ident;
 
-/// Sheet names in workbook order.
-pub fn sheet_names(path: &Path) -> Result<Vec<String>> {
-    let workbook = open_workbook_auto(path).context("couldn't open the workbook")?;
-    Ok(workbook.sheet_names())
+/// Every sheet of the workbook, in order, with its name. A sheet that can't be
+/// read comes back empty, so one bad sheet doesn't stop the others opening.
+pub(crate) fn read_sheets(path: &Path) -> Result<Vec<(String, Range<Data>)>> {
+    let mut workbook = open_workbook_auto(path).context("couldn't open the workbook")?;
+    let names = workbook.sheet_names();
+    Ok(names
+        .into_iter()
+        .enumerate()
+        .map(|(index, name)| {
+            let range = workbook
+                .worksheet_range_at(index)
+                .and_then(Result::ok)
+                .unwrap_or_else(Range::empty);
+            (name, range)
+        })
+        .collect())
 }
 
-/// Loads sheet `index` into a new table called `table`.
-pub(crate) fn load_sheet(conn: &Connection, path: &Path, index: usize, table: &str) -> Result<()> {
+/// The sheet at `index`, read again (for a preview after opening).
+pub(crate) fn read_sheet(path: &Path, index: usize) -> Result<Range<Data>> {
     let mut workbook = open_workbook_auto(path).context("couldn't open the workbook")?;
-    let range = workbook
+    workbook
         .worksheet_range_at(index)
-        .ok_or_else(|| anyhow!("the workbook has no sheet {}", index + 1))?
-        .context("couldn't read the sheet")?;
+        .context("the sheet is gone")?
+        .context("couldn't read the sheet")
+}
 
+/// The sheet as a grid for the table finder. Grid positions are sheet
+/// positions: row 0 is row 1 and column 0 is column A.
+pub(crate) fn grid(range: &Range<Data>) -> Vec<Vec<Cell>> {
+    let Some((top, left)) = range.start() else {
+        return Vec::new();
+    };
+    let mut grid = vec![Vec::new(); top as usize];
+    for row in range.rows() {
+        let padding = std::iter::repeat_with(Cell::default).take(left as usize);
+        grid.push(padding.chain(row.iter().map(grid_cell)).collect());
+    }
+    grid
+}
+
+fn grid_cell(cell: &Data) -> Cell {
+    match cell {
+        Data::Empty => Cell::default(),
+        Data::String(s) => Cell::from_text(s.as_str()),
+        Data::DateTime(dt) if dt.is_datetime() && dt.as_f64().fract() == 0.0 => {
+            let (y, mo, d, ..) = dt.to_ymd_hms_milli();
+            Cell {
+                text: format!("{y:04}-{mo:02}-{d:02}"),
+                value: true,
+            }
+        }
+        other => Cell {
+            text: text(other),
+            value: true,
+        },
+    }
+}
+
+/// How the app read a sheet before the table finder, kept for sheets where it
+/// finds no table: skip leading blank rows, then the first row is the header
+/// if every cell in it is text. Returns the header and the body rows.
+fn whole_sheet(range: &Range<Data>) -> (Option<&[Data]>, Vec<&[Data]>) {
     let rows: Vec<&[Data]> = range.rows().collect();
-    // DuckDB tables need a column, so an empty sheet gets one with no rows.
-    let width = range.width().max(1);
-    // Skip leading blank rows so a title gap above the table doesn't become the header.
     let first = rows
         .iter()
         .position(|row| row.iter().any(|cell| !matches!(cell, Data::Empty)))
         .unwrap_or(rows.len());
     let rows = &rows[first..];
-
     let has_header = rows.first().is_some_and(|row| {
         row.iter()
             .all(|cell| matches!(cell, Data::String(_) | Data::Empty))
     });
-    let (header, body) = match rows.split_first() {
-        Some((header, body)) if has_header => (Some(*header), body),
-        _ => (None, rows),
-    };
+    match rows.split_first() {
+        Some((header, body)) if has_header => (Some(*header), body.to_vec()),
+        _ => (None, rows.to_vec()),
+    }
+}
 
-    let names = column_names(header, width);
-    let types: Vec<ColType> = (0..width)
-        .map(|col| infer(body.iter().map(|row| row.get(col).unwrap_or(&Data::Empty))))
+/// Data rows in a sheet read whole.
+pub(crate) fn whole_sheet_rows(range: &Range<Data>) -> usize {
+    whole_sheet(range).1.len()
+}
+
+/// Loads a sheet read whole into a new table called `table`.
+pub(crate) fn load_sheet(conn: &Connection, range: &Range<Data>, table: &str) -> Result<()> {
+    let (header, body) = whole_sheet(range);
+    // DuckDB tables need a column, so an empty sheet gets one with no rows.
+    let width = range.width().max(1);
+    let names = unique_names(
+        (0..width).map(|col| match header.and_then(|row| row.get(col)) {
+            Some(Data::String(s)) if !s.trim().is_empty() => s.trim().to_string(),
+            _ => format!("column_{}", col + 1),
+        }),
+    );
+    let body: Vec<Vec<&Data>> = body
+        .iter()
+        .map(|row| {
+            (0..width)
+                .map(|col| row.get(col).unwrap_or(&Data::Empty))
+                .collect()
+        })
         .collect();
+    create(conn, table, &names, &body)
+}
 
+/// Loads a table the finder found (or the user adjusted) into a new table called `name`.
+pub(crate) fn load_table(
+    conn: &Connection,
+    range: &Range<Data>,
+    table: &Table,
+    name: &str,
+) -> Result<()> {
+    let names: Vec<String> = table.columns.iter().map(|c| c.name.clone()).collect();
+    let body: Vec<Vec<&Data>> = table
+        .body
+        .iter()
+        .map(|&row| {
+            table
+                .columns
+                .iter()
+                .map(|c| {
+                    range
+                        .get_value((row as u32, c.col as u32))
+                        .unwrap_or(&Data::Empty)
+                })
+                .collect()
+        })
+        .collect();
+    create(conn, name, &names, &body)
+}
+
+/// Creates `table` with one column per name, typed from its cells, and fills it.
+fn create(conn: &Connection, table: &str, names: &[String], body: &[Vec<&Data>]) -> Result<()> {
+    let types: Vec<ColType> = (0..names.len())
+        .map(|col| infer(body.iter().map(|row| row[col])))
+        .collect();
     let columns = names
         .iter()
         .zip(&types)
@@ -60,36 +161,11 @@ pub(crate) fn load_sheet(conn: &Connection, path: &Path, index: usize, table: &s
 
     let mut appender = conn.appender(table)?;
     for row in body {
-        let values = types
-            .iter()
-            .enumerate()
-            .map(|(col, ty)| ty.value(row.get(col).unwrap_or(&Data::Empty)));
+        let values = types.iter().zip(row).map(|(ty, cell)| ty.value(cell));
         appender.append_row(appender_params_from_iter(values))?;
     }
     appender.flush()?;
     Ok(())
-}
-
-/// Header cells become names; blanks get `column_N`, and duplicates get a suffix.
-fn column_names(header: Option<&[Data]>, width: usize) -> Vec<String> {
-    let mut names: Vec<String> = Vec::with_capacity(width);
-    for col in 0..width {
-        let raw = match header.and_then(|row| row.get(col)) {
-            Some(Data::String(s)) if !s.trim().is_empty() => s.trim().to_string(),
-            _ => format!("column_{}", col + 1),
-        };
-        let mut name = raw.clone();
-        let mut n = 2;
-        while names
-            .iter()
-            .any(|existing| existing.eq_ignore_ascii_case(&name))
-        {
-            name = format!("{raw}_{n}");
-            n += 1;
-        }
-        names.push(name);
-    }
-    names
 }
 
 /// The DuckDB type chosen for a spreadsheet column. Mixed columns fall back to text.
@@ -242,15 +318,5 @@ mod tests {
         assert_eq!(days_from_civil(1970, 1, 1), 0);
         assert_eq!(days_from_civil(2000, 3, 1), 11_017);
         assert_eq!(days_from_civil(1969, 12, 31), -1);
-    }
-
-    #[test]
-    fn names_blank_and_duplicate_headers() {
-        let header = [
-            Data::String("id".into()),
-            Data::Empty,
-            Data::String("ID".into()),
-        ];
-        assert_eq!(column_names(Some(&header), 3), ["id", "column_2", "ID_2"]);
     }
 }

@@ -1,6 +1,6 @@
 //! Text formatting helpers for counts, percentages and column widths.
 
-use da_core::Column;
+use da_core::NumberFormat;
 
 /// `1234567` → `1,234,567`.
 pub fn group_digits(n: u64) -> String {
@@ -29,6 +29,12 @@ pub fn percent(fraction: f64) -> String {
     } else {
         format!("{pct:.1}%")
     }
+}
+
+/// A plain number from the engine as a column with `format` shows it, like
+/// `0.126` as `12.6%`. `None` without a format, or when `value` isn't a number.
+pub fn formatted(format: Option<NumberFormat>, value: &str) -> Option<String> {
+    Some(format?.render(value.trim().parse().ok()?))
 }
 
 /// "1 row" / "2 rows".
@@ -62,11 +68,11 @@ const CHAR_WIDTH: f32 = 7.6;
 const MIN_COLUMN_WIDTH: f32 = 64.0;
 const MAX_COLUMN_WIDTH: f32 = 420.0;
 
-/// Picks a starting width for a column from its header and a sample of its
-/// cells: wide enough for typical values, capped so one long text column
+/// Picks a starting width for a column from its header text and a sample of
+/// its cells: wide enough for typical values, capped so one long text column
 /// doesn't take over the window.
 pub fn initial_column_width<'a>(
-    column: &Column,
+    header: &str,
     sample: impl Iterator<Item = Option<&'a str>>,
 ) -> f32 {
     let mut longest_cell = 4;
@@ -76,7 +82,7 @@ pub fn initial_column_width<'a>(
     }
     let cells = longest_cell.min(56) as f32 * CHAR_WIDTH + 24.0;
     // Headers carry a type glyph, a menu button and room for a sort arrow.
-    let header = column.name.chars().count().min(40) as f32 * 7.6 + 64.0;
+    let header = header.chars().count().min(40) as f32 * 7.6 + 64.0;
     cells.max(header).clamp(MIN_COLUMN_WIDTH, MAX_COLUMN_WIDTH)
 }
 
@@ -118,17 +124,14 @@ mod tests {
 
     #[test]
     fn column_widths() {
-        let id = Column::new("id", "BIGINT");
-        let w = initial_column_width(&id, [Some("1"), Some("22")].into_iter());
+        let w = initial_column_width("id", [Some("1"), Some("22")].into_iter());
         assert_eq!(w, 2.0 * 7.6 + 64.0);
 
-        let text = Column::new("description", "VARCHAR");
         let long = "x".repeat(500);
-        let w = initial_column_width(&text, [Some(long.as_str()), None].into_iter());
+        let w = initial_column_width("description", [Some(long.as_str()), None].into_iter());
         assert_eq!(w, MAX_COLUMN_WIDTH);
 
-        let name = Column::new("name", "VARCHAR");
-        let w = initial_column_width(&name, [Some("Ada Lovelace")].into_iter());
+        let w = initial_column_width("name", [Some("Ada Lovelace")].into_iter());
         assert!(w > MIN_COLUMN_WIDTH && w < 200.0, "{w}");
 
         assert!(gutter_width(30_000_000) > gutter_width(100));

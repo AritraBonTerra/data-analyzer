@@ -1,0 +1,18 @@
+Region,Product,Units,Revenue
+North,Oat Milk 1L,502,2777
+North,Cold Brew 330ml,725,5135
+North,Granola 500g,177,3856
+North Total,,1404,11768
+South,Oat Milk 1L,437,5227
+South,Cold Brew 330ml,321,3449
+South,Granola 500g,234,5726
+South Total,,992,14402
+East,Oat Milk 1L,739,1257
+East,Cold Brew 330ml,316,2290
+East,Granola 500g,469,6857
+East Total,,1524,10404
+West,Oat Milk 1L,578,3614
+West,Cold Brew 330ml,690,4737
+West,Granola 500g,497,8579
+West Total,,1765,16930
+Grand Total,,5685,53504

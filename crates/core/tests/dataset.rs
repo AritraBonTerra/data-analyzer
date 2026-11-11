@@ -29,7 +29,7 @@ impl Scratch {
             path,
             &OpenOptions {
                 cache_dir: self.0.join("cache"),
-                sheet: 0,
+                ..Default::default()
             },
         )
         .unwrap()
@@ -212,7 +212,7 @@ fn xlsx_and_xls_load_with_types() {
         let s = Scratch::new();
         let ds = s.open(&fixture(name));
         assert!(ds.is_loaded(), "{name}");
-        assert_eq!(ds.sheets()[0], "Fruit", "{name}");
+        assert_eq!(ds.parts()[ds.part()].label, "Fruit", "{name}");
         let frame = ds.frame().unwrap();
         assert_eq!(frame.rows, Some(3), "{name}");
         assert_eq!(
@@ -249,11 +249,12 @@ fn empty_sheet_opens() {
         &fixture("fruit.xlsx"),
         &OpenOptions {
             cache_dir: s.0.join("cache"),
-            sheet: 1,
+            part: Some(1),
+            ..Default::default()
         },
     )
     .unwrap();
-    assert_eq!(ds.sheet(), 1);
+    assert_eq!(ds.part(), 1);
     assert_eq!(ds.frame().unwrap().rows, Some(0));
 }
 
@@ -637,7 +638,7 @@ fn rejects_unknown_files() {
         &path,
         &OpenOptions {
             cache_dir: s.0.clone(),
-            sheet: 0,
+            ..Default::default()
         },
     );
     assert!(err.is_err());

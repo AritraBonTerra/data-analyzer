@@ -11,7 +11,7 @@ use gpui_kit::component::{ActiveTheme, Icon, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
-use crate::format::{group_digits, percent, type_label};
+use crate::format::{formatted, group_digits, percent, type_label};
 use crate::theme::{self, kind_icon, tabular};
 
 /// Histogram bins and top values requested for the panel.
@@ -59,6 +59,12 @@ impl StatsPanel {
 
     pub fn frame_id(&self) -> Option<u64> {
         self.frame_id
+    }
+
+    /// Whether a distribution is still being computed. For the screenshot harness.
+    #[cfg(test)]
+    pub fn is_loading(&self) -> bool {
+        self.loading
     }
 
     /// Shows `column` of `frame`, computing its distribution in the background.
@@ -149,12 +155,25 @@ impl StatsPanel {
                 .text_color(cx.theme().muted_foreground)
                 .child("Computing summary…");
         };
-        let numeric = self
-            .column
-            .as_ref()
-            .is_some_and(|c| c.kind == ColumnKind::Number);
+        let column = self.column.as_ref();
+        let numeric = column.is_some_and(|c| c.kind == ColumnKind::Number);
+        let format = column.and_then(|c| c.format);
+        // Numbers show the way the column does; text extremes as-is:
+        // "001.00" is a value, not a number.
+        let show = |value: &Option<String>| {
+            value
+                .as_deref()
+                .map(|v| formatted(format, v).unwrap_or_else(|| tidy_if(numeric, v)))
+        };
         let nulls = summary.null_percent / 100.0;
         let null_count = summary.nulls;
+        let number = |label, value: &Option<String>| {
+            if numeric {
+                Self::fact(label, show(value), cx)
+            } else {
+                None
+            }
+        };
         let facts = [
             Self::fact("Rows", Some(group_digits(summary.count)), cx),
             Self::fact(
@@ -171,42 +190,13 @@ impl StatsPanel {
                 Some(format!("≈ {}", group_digits(summary.distinct))),
                 cx,
             ),
-            // Text extremes are shown as-is: "001.00" is a value, not a number.
-            Self::fact(
-                "Min",
-                summary.min.as_deref().map(|v| tidy_if(numeric, v)),
-                cx,
-            ),
-            Self::fact(
-                "Max",
-                summary.max.as_deref().map(|v| tidy_if(numeric, v)),
-                cx,
-            ),
-            if numeric {
-                Self::fact("Mean", summary.mean.clone(), cx)
-            } else {
-                None
-            },
-            if numeric {
-                Self::fact("Std dev", summary.std.clone(), cx)
-            } else {
-                None
-            },
-            if numeric {
-                Self::fact("25th pct", summary.q25.clone(), cx)
-            } else {
-                None
-            },
-            if numeric {
-                Self::fact("Median", summary.median.clone(), cx)
-            } else {
-                None
-            },
-            if numeric {
-                Self::fact("75th pct", summary.q75.clone(), cx)
-            } else {
-                None
-            },
+            Self::fact("Min", show(&summary.min), cx),
+            Self::fact("Max", show(&summary.max), cx),
+            number("Mean", &summary.mean),
+            number("Std dev", &summary.std),
+            number("25th pct", &summary.q25),
+            number("Median", &summary.median),
+            number("75th pct", &summary.q75),
         ];
         v_flex().w_full().children(facts.into_iter().flatten())
     }
@@ -214,14 +204,16 @@ impl StatsPanel {
     fn render_histogram(&self, bins: &[Bin], cx: &mut Context<Self>) -> Div {
         let palette = theme::palette(cx);
         let column = self.column.clone();
+        let format = column.as_ref().and_then(|c| c.format);
+        let edge = |value: &str| formatted(format, value).unwrap_or_else(|| tidy_number(value));
         let max = bins.iter().map(|b| b.count).max().unwrap_or(0).max(1) as f32;
         let total: u64 = bins.iter().map(|b| b.count).sum();
         let hovered = self.hovered;
         let readout = match hovered.and_then(|ix| bins.get(ix)) {
             Some(bin) if bin.count > 0 => format!(
                 "{} – {}  ·  {} rows ({})",
-                bin.first.as_deref().map(tidy_number).unwrap_or_default(),
-                bin.last.as_deref().map(tidy_number).unwrap_or_default(),
+                bin.first.as_deref().map(edge).unwrap_or_default(),
+                bin.last.as_deref().map(edge).unwrap_or_default(),
                 group_digits(bin.count),
                 percent(bin.count as f64 / total.max(1) as f64)
             ),
@@ -230,12 +222,12 @@ impl StatsPanel {
         };
         let low = bins
             .iter()
-            .find_map(|b| b.first.as_deref().map(tidy_number))
+            .find_map(|b| b.first.as_deref().map(edge))
             .unwrap_or_default();
         let high = bins
             .iter()
             .rev()
-            .find_map(|b| b.last.as_deref().map(tidy_number))
+            .find_map(|b| b.last.as_deref().map(edge))
             .unwrap_or_default();
 
         v_flex()
@@ -326,6 +318,7 @@ impl StatsPanel {
     ) -> Div {
         let palette = theme::palette(cx);
         let column = self.column.clone();
+        let format = column.as_ref().and_then(|c| c.format);
         let total = values.iter().map(|(_, n)| n).sum::<u64>() + other;
         let max = values.iter().map(|(_, n)| *n).max().unwrap_or(0).max(1) as f32;
         let muted = cx.theme().muted_foreground;
@@ -416,7 +409,7 @@ impl StatsPanel {
                 ),
                 Some(v) => row(
                     ix,
-                    v.clone().into(),
+                    formatted(format, v).unwrap_or_else(|| v.clone()).into(),
                     *count,
                     false,
                     Some(FilterOp::Equals(v.clone())),
