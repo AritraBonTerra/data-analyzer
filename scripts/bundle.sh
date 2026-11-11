@@ -13,7 +13,8 @@
 #                     --apple-id you@example.com --team-id TEAMID --password <app-specific>
 set -euo pipefail
 cd "$(dirname "$0")/.."
-source "$HOME/.cargo/env" 2>/dev/null || true
+# macOS's bash 3.2 exits on a failed `source` even with `|| true`, so test first.
+[[ -f "$HOME/.cargo/env" ]] && source "$HOME/.cargo/env"
 
 notarize=false
 [[ "${1:-}" == "--notarize" ]] && notarize=true
