@@ -1741,7 +1741,9 @@ mod tests {
 
     /// Real clicks on the rendered card, through the window's event dispatch:
     /// Later takes the card away, and Install runs the install.
-    #[cfg(target_os = "macos")]
+    /// Debug builds only: GPUI records the selectors the clicks aim at only
+    /// there, so `cargo test --release` (the release workflow) skips this.
+    #[cfg(all(target_os = "macos", debug_assertions))]
     #[test]
     fn clicks_on_the_card() {
         use gpui_kit::{Modifiers, TestAppContext, TestDispatcher, VisualTestContext};
@@ -1816,6 +1818,8 @@ mod tests {
     }
 
     /// Runs tasks, lets a second pass (toast animations), and draws a frame.
+    /// Used by the click test only, so it shares that test's condition.
+    #[cfg(all(target_os = "macos", debug_assertions))]
     fn settle(cx: &mut gpui_kit::VisualTestContext) {
         for _ in 0..10 {
             cx.run_until_parked();
