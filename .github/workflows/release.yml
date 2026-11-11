@@ -37,6 +37,20 @@ jobs:
         id: tag
         run: scripts/release-tag.sh "$GITHUB_REF_NAME" >>"$GITHUB_OUTPUT"
 
+      # A real release must be a commit that is in main; a trial run can be anywhere.
+      - name: Check the tag is on main
+        env:
+          DRY_RUN: ${{ steps.tag.outputs.dry_run }}
+        run: |
+          if git merge-base --is-ancestor HEAD origin/main; then
+            echo "Tagged commit is in main."
+          elif [[ "$DRY_RUN" == false ]]; then
+            echo "::error::$GITHUB_REF_NAME is not on main. Merge first, then tag main."
+            exit 1
+          else
+            echo "Tagged commit is not in main (trial run, so that is fine)."
+          fi
+
       - name: Install Rust from rust-toolchain.toml
         run: rustup toolchain install
 
