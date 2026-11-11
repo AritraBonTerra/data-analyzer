@@ -1508,12 +1508,15 @@ dependencies = [
  "gpui-pre-apple",
  "gpui-pre-platform",
  "image",
+ "libc",
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
  "objc2-uniform-type-identifiers",
  "percent-encoding",
+ "semver",
  "serde",
  "serde_json",
+ "sha2 0.11.1",
 ]
 
 [[package]]

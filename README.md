@@ -29,10 +29,15 @@ Measured on an M4 Pro with a 2.4 GB, 30M-row CSV (release build, warm disk): fir
 Download the DMG from the [Releases page](https://github.com/AritraBonTerra/data-analyzer/releases) and drag Data Analyzer to Applications (Apple Silicon only).
 The app is not signed with an Apple Developer ID, so macOS blocks the first launch of a downloaded build: allow it once under System Settings, Privacy & Security.
 
+Updates: each time the app opens it asks GitHub whether a newer release exists, and offers to install it. Install downloads the new version,
+checks its signature, swaps the app and relaunches with the same files open. Nothing but that one request is sent.
+"Check for Updates…" in the app menu checks on demand, and `data-analyzer --update` does the same from a terminal.
+
 ## Layout
 - `crates/core` (`da-core`): the data engine. DuckDB for CSV/TSV/Parquet/JSON, calamine for Excel. No UI code.
 - `crates/app` (`data-analyzer`): the GPUI interface, built with [gpui-kit](https://github.com/longbridge/gpui-kit).
 - `packaging/Info.plist`, `scripts/bundle.sh`: app bundle, file associations, signing and notarization.
+- `crates/app/src/update.rs`: the updater. `.github/workflows/`, `scripts/release-*.sh`: checks and releases on GitHub.
 
 ## Develop
 ```sh

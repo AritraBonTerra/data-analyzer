@@ -16,9 +16,16 @@ futures = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 percent-encoding = "2"
+# Both already in the app's dependency tree (via gpui-kit); the updater uses
+# them for version order and the download's checksum.
+semver = "1"
+sha2 = "0.11"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = "0.6"
+# Already in the tree (da-core, DuckDB). The updater's atomic swap
+# (`renamex_np`) and its check for a running process (`kill`).
+libc = "0.2"
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSBundle", "NSError", "NSString", "NSURL"] }
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSWorkspace", "block2", "objc2-uniform-type-identifiers"] }
 objc2-uniform-type-identifiers = { version = "0.3", default-features = false, features = ["std", "UTType"] }
