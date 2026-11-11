@@ -1,8 +1,9 @@
 //! Data Analyzer: a native macOS viewer for CSV, TSV, Excel, Parquet and JSON.
 //!
 //! This file wires the app together: actions and shortcuts, the native menu
-//! bar, routing of files to windows (CLI args, ⌘O, Finder, drag and drop) and
-//! the app-wide state (recent files, open windows).
+//! bar, routing of files to windows (CLI args, ⌘O, Finder, drag and drop),
+//! the app-wide state (recent files, open windows) and the two command-line
+//! flags, `--version` and `--update`.
 
 mod chart;
 mod details;
@@ -19,6 +20,7 @@ mod shots;
 mod sql;
 mod stats;
 mod theme;
+mod update;
 mod welcome;
 mod workspace;
 
@@ -45,6 +47,7 @@ actions!(
         CloseWindow,
         Quit,
         About,
+        CheckForUpdates,
         MakeDefault,
         ClearRecent,
         Minimize,
@@ -63,6 +66,16 @@ struct Windows(Vec<(AnyWindowHandle, Entity<Workspace>)>);
 impl Global for Windows {}
 
 fn main() {
+    // Flags are only recognized on their own; anything else is a file to open.
+    match std::env::args().nth(1).as_deref() {
+        Some("--version") => {
+            println!("{}", update::VERSION);
+            return;
+        }
+        Some("--update") => std::process::exit(update::run_cli()),
+        _ => {}
+    }
+
     let app = gpui_kit::application().with_assets(gpui_kit::assets::AllAssets);
 
     // Finder and `open` deliver files through the app delegate, sometimes
@@ -121,13 +134,17 @@ fn main() {
                 let _ = window.update(cx, |_, window, cx| {
                     window.push_notification(
                         gpui_kit::component::notification::Notification::info(
-                            "Data Analyzer 0.1 · a fast viewer for CSV, Excel, Parquet and JSON files.",
+                            format!(
+                                "Data Analyzer {} · a fast viewer for CSV, Excel, Parquet and JSON files.",
+                                update::VERSION
+                            ),
                         ),
                         cx,
                     );
                 });
             }
         });
+        cx.on_action(|_: &CheckForUpdates, cx| update::check_from_menu(cx));
         cx.on_action(|_: &MakeDefault, cx| {
             let result = platform::make_default_for_data_files();
             if let Some(window) = cx.active_window() {
@@ -185,6 +202,7 @@ fn main() {
             }
         }
         cx.activate(true);
+        update::init(cx);
     });
 }
 
@@ -336,6 +354,7 @@ fn rebuild_menus(cx: &mut App) {
     cx.set_menus(vec![
         Menu::new("Data Analyzer").items([
             MenuItem::action("About Data Analyzer", About),
+            MenuItem::action("Check for Updates…", CheckForUpdates),
             MenuItem::separator(),
             MenuItem::action("Make Default for Data Files…", MakeDefault),
             MenuItem::separator(),

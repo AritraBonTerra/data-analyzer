@@ -25,10 +25,19 @@ A free, native macOS app for opening and exploring data files: CSV, TSV, Excel (
 
 Measured on an M4 Pro with a 2.4 GB, 30M-row CSV (release build, warm disk): first rows in 170 ms, full load in 3.5 s, any page in about 4 ms, sort in 2.2 s, search in 1 s.
 
+## Install
+Download the DMG from the [Releases page](https://github.com/AritraBonTerra/data-analyzer/releases) and drag Data Analyzer to Applications (Apple Silicon only).
+The app is not signed with an Apple Developer ID, so macOS blocks the first launch of a downloaded build: allow it once under System Settings, Privacy & Security.
+
+Updates: each time the app opens it asks GitHub whether a newer release exists, and offers to install it. Install downloads the new version,
+checks its signature, swaps the app and relaunches with the same files open. Nothing but that one request is sent.
+"Check for Updates…" in the app menu checks on demand, and `data-analyzer --update` does the same from a terminal.
+
 ## Layout
 - `crates/core` (`da-core`): the data engine. DuckDB for CSV/TSV/Parquet/JSON, calamine for Excel. No UI code.
 - `crates/app` (`data-analyzer`): the GPUI interface, built with [gpui-kit](https://github.com/longbridge/gpui-kit).
 - `packaging/Info.plist`, `scripts/bundle.sh`: app bundle, file associations, signing and notarization.
+- `crates/app/src/update.rs`: the updater. `.github/workflows/`, `scripts/release-*.sh`: checks and releases on GitHub.
 
 ## Develop
 ```sh
@@ -47,3 +56,23 @@ Add a scenario there to look at a UI change.
 scripts/bundle.sh               # dist/Data Analyzer.app + DMG, signed with your Developer ID
 scripts/bundle.sh --notarize    # also notarize + staple (needs a notarytool profile, see the script header)
 ```
+
+## Releasing
+Every pull request and every push to `main` runs format, lint and tests (`.github/workflows/ci.yml`).
+To release:
+1. Bump `version` in `crates/app/Cargo.toml` and merge it to `main`.
+2. Tag `main`: `git switch main && git pull && git tag v0.2.1 && git push origin v0.2.1`. The tag must be `v` plus that version, on a commit that is in `main`.
+
+`.github/workflows/release.yml` then checks, tests and builds the app on GitHub, and publishes a release with
+notes generated from the merged pull requests, `Data-Analyzer-<version>.dmg` and `latest.json` (version,
+download link, size, SHA-256 and update signature). The run is under the Actions tab and takes about 25 minutes.
+If any step fails, nothing is published.
+
+Trial run: push a tag like `v0.2.1-dryrun.1`. It runs every step but publishing, and the DMG and
+`latest.json` appear as artifacts on the workflow run. Delete the tag afterwards
+(`git tag -d v0.2.1-dryrun.1 && git push origin --delete v0.2.1-dryrun.1`).
+
+Update key: each DMG is signed with an SSH key, and the signature goes in `latest.json`. The public half is `packaging/update-key.pub`;
+the private half is the repo secret `UPDATE_SIGNING_KEY`. GitHub never shows a secret again, so keep a copy of the private key
+somewhere safe. If it is lost, make a new pair;
+installed apps then need one manual reinstall of a build that carries the new public key.

@@ -18,8 +18,8 @@
 //!
 //! To add a scenario, add a line to [`scenarios`]: a name, a file (relative to
 //! the repo root), then any of `.light()`, `.width(points)`, `.select(column)`,
-//! `.action(A)` and `.with(|doc, window, cx| ...)` for anything the others
-//! don't cover.
+//! `.action(A)`, `.wait()` (lets an animation finish) and
+//! `.with(|doc, window, cx| ...)` for anything the others don't cover.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -365,6 +365,26 @@ fn scenarios() -> Vec<Scenario> {
         Scenario::new("json-chart", &envelope)
             .action(ToggleChart)
             .with(chart(ChartKind::Bar, "customer.tier", &["total"], None)),
+        // The updater's prompt card in each state, and the menu's answer.
+        Scenario::new("update-available", &sales)
+            .with(update_card("available"))
+            .wait(),
+        Scenario::new("update-available-light", &sales)
+            .light()
+            .with(update_card("available"))
+            .wait(),
+        Scenario::new("update-downloading", &sales)
+            .with(update_card("downloading"))
+            .wait(),
+        Scenario::new("update-ready", &sales)
+            .with(update_card("ready"))
+            .wait(),
+        Scenario::new("update-cannot", &sales)
+            .with(update_card("cannot"))
+            .wait(),
+        Scenario::new("update-uptodate", &sales)
+            .with(update_card("uptodate"))
+            .wait(),
     ]
 }
 
@@ -411,6 +431,13 @@ fn hover(doc: &mut Document, _: &mut Window, cx: &mut Context<Document>) {
         .update(cx, |panel, cx| panel.hover_first(cx));
 }
 
+/// A step that shows the updater's card in one of its states.
+fn update_card(
+    case: &'static str,
+) -> impl FnOnce(&mut Document, &mut Window, &mut Context<Document>) {
+    move |_, _, cx| crate::update::show_for_shots(case, cx)
+}
+
 /// Opens the Details popover, as clicking "Details" in the strip does.
 fn details(doc: &mut Document, window: &mut Window, cx: &mut Context<Document>) {
     doc.show_details(window, cx);
@@ -446,6 +473,9 @@ enum Step {
     SelectColumn(&'static str),
     /// Runs arbitrary code against the document.
     With(Box<DocFn>),
+    /// Lets half a second pass, on the app's clock and the real one, so
+    /// animations (a notification sliding in) finish.
+    Wait,
 }
 
 /// Code a [`Step::With`] runs against the document.
@@ -480,6 +510,11 @@ impl Scenario {
 
     fn select(mut self, column: &'static str) -> Self {
         self.steps.push(Step::SelectColumn(column));
+        self
+    }
+
+    fn wait(mut self) -> Self {
+        self.steps.push(Step::Wait);
         self
     }
 
@@ -538,6 +573,7 @@ impl Scenario {
                 Step::Action(action) => action.name(),
                 Step::SelectColumn(_) => "select column",
                 Step::With(_) => "custom step",
+                Step::Wait => "wait",
             };
             match step {
                 Step::Action(action) => cx
@@ -551,6 +587,14 @@ impl Scenario {
                         doc.update(cx, |doc, cx| f(doc, window, cx))
                     })
                     .unwrap(),
+                Step::Wait => {
+                    for _ in 0..5 {
+                        std::thread::sleep(Duration::from_millis(100));
+                        cx.advance_clock(Duration::from_millis(100));
+                        draw(&mut cx, window);
+                        cx.run_until_parked();
+                    }
+                }
             }
             settle(&mut cx, window, &doc, name, what);
         }
