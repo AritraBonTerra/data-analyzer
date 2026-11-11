@@ -4,6 +4,7 @@
 //! bar, routing of files to windows (CLI args, ⌘O, Finder, drag and drop) and
 //! the app-wide state (recent files, open windows).
 
+mod chart;
 mod details;
 mod document;
 mod filter;
@@ -30,8 +31,8 @@ use gpui_kit::*;
 use serde::Deserialize;
 
 use crate::document::{
-    AdjustImport, ClearFilters, Export, ExportAs, ExportKind, Find, ShowFileData, ToggleSql,
-    ToggleStats,
+    AdjustImport, ClearFilters, Export, ExportAs, ExportKind, Find, ShowFileData, ToggleChart,
+    ToggleSql, ToggleStats,
 };
 use crate::recent::RecentStore;
 use crate::workspace::Workspace;
@@ -285,7 +286,7 @@ pub fn refresh_menus(cx: &mut App) {
 }
 
 fn rebuild_menus(cx: &mut App) {
-    let (stats, sql, adjust) = cx
+    let (stats, chart, sql, adjust) = cx
         .active_window()
         .and_then(|handle| {
             let windows = &cx.global::<Windows>().0;
@@ -297,9 +298,14 @@ fn rebuild_menus(cx: &mut App) {
         .and_then(|workspace| workspace.read(cx).document().cloned())
         .map(|doc| {
             let doc = doc.read(cx);
-            (doc.stats_shown(), doc.sql_shown(), doc.can_adjust_import())
+            (
+                doc.stats_shown(),
+                doc.chart_shown(),
+                doc.sql_shown(),
+                doc.can_adjust_import(),
+            )
         })
-        .unwrap_or((false, false, false));
+        .unwrap_or((false, false, false, false));
 
     let recent: Vec<MenuItem> = cx
         .global::<RecentStore>()
@@ -364,6 +370,7 @@ fn rebuild_menus(cx: &mut App) {
         ]),
         Menu::new("View").items([
             MenuItem::action("Stats Panel", ToggleStats).checked(stats),
+            MenuItem::action("Chart Panel", ToggleChart).checked(chart),
             MenuItem::action("SQL Panel", ToggleSql).checked(sql),
             MenuItem::separator(),
             MenuItem::action("Show File Data", ShowFileData),

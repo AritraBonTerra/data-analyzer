@@ -12,6 +12,7 @@ A free, native macOS app for opening and exploring data files: CSV, TSV, Excel (
 - **Sort, filter, search.** Click headers to sort (shift-click for a secondary sort). Use column menus for filters and ⌘F to search every column.
 - **Stats panel** (⌘I): summary stats, a histogram or top values, and click-to-filter.
 - **SQL** (⌘E): the file is the table `data`, and results open in the same grid.
+- **Chart panel** (⇧⌘C): bar, line, scatter or histogram of what the grid shows, picked from dropdowns, with click-to-filter.
 - **Export** the current view to CSV, Parquet or JSON Lines.
 - **Values read as written.** Text columns of `$1,234.00`, `12.6%`, `1.424,50`, mixed date spellings or Yes/No load as numbers, dates and booleans, shown the way the file wrote them; a column with one value that doesn't fit stays text. Files in Windows-1252 or UTF-16 open too.
 - **Excel sheets** as tabs. **Default app** for data files via *Data Analyzer → Make Default for Data Files…*

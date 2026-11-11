@@ -1,5 +1,5 @@
 //! One open file: owns the dataset and the frames derived from it, and
-//! coordinates the grid, search, filters, stats panel and SQL drawer. Every
+//! coordinates the grid, search, filters, chart and stats panels and SQL drawer. Every
 //! dataset call runs on the background executor; results are matched against
 //! generation counters so stale work is dropped.
 
@@ -27,6 +27,7 @@ use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use serde::Deserialize;
 
+use crate::chart::{self, ChartEvent, ChartPanel};
 use crate::filter::{FilterEditor, FilterEvent, MenuFor};
 use crate::format::{formatted, group_digits, percent, plural};
 use crate::grid::{GridDelegate, GridEvent, PREVIEW_ROWS};
@@ -40,6 +41,7 @@ actions!(
     document,
     [
         ToggleStats,
+        ToggleChart,
         ToggleSql,
         Find,
         Copy,
@@ -81,11 +83,14 @@ pub struct ExportAs(pub ExportKind);
 const CONTEXT: &str = "Document";
 const SEARCH_DEBOUNCE: Duration = Duration::from_millis(220);
 const SQL_HEIGHT: f32 = 210.0;
+/// The share of the grid's height the chart panel takes when open.
+const CHART_SHARE: f32 = 0.45;
 
 pub fn init(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("cmd-i", ToggleStats, Some(CONTEXT)),
         KeyBinding::new("cmd-e", ToggleSql, Some(CONTEXT)),
+        KeyBinding::new("cmd-shift-c", ToggleChart, Some(CONTEXT)),
         KeyBinding::new("cmd-f", Find, Some(CONTEXT)),
         KeyBinding::new("cmd-c", Copy, Some("DataTable")),
         KeyBinding::new("cmd-shift-e", Export, Some(CONTEXT)),
@@ -214,8 +219,9 @@ pub struct Document {
     dataset: Option<Arc<Dataset>>,
     /// The whole file.
     base: Option<Frame>,
-    /// The last SQL result, when the grid is showing one.
+    /// The last SQL result, when the grid is showing one, and its query.
     query_frame: Option<Frame>,
+    query_sql: Option<String>,
     /// The frame on screen: the base, a sorted/filtered copy, or a query result.
     view: Option<Frame>,
     source: Source,
@@ -250,6 +256,7 @@ pub struct Document {
     /// Errors from background work, shown as toasts on the next render.
     pending_errors: Vec<String>,
     show_stats: bool,
+    show_chart: bool,
     show_sql: bool,
 
     table: Entity<TableState<GridDelegate>>,
@@ -262,6 +269,7 @@ pub struct Document {
     goto_open: bool,
     filter_editor: Entity<FilterEditor>,
     stats: Entity<StatsPanel>,
+    chart: Entity<ChartPanel>,
     sql: Entity<SqlPanel>,
     import: Entity<ImportPanel>,
     _subscriptions: Vec<Subscription>,
@@ -288,6 +296,7 @@ impl Document {
         let goto = cx.new(|cx| InputState::new(window, cx).placeholder("Row number"));
         let filter_editor = cx.new(|cx| FilterEditor::new(window, cx));
         let stats = cx.new(|_| StatsPanel::new());
+        let chart = cx.new(|_| ChartPanel::new());
         let sql = cx.new(|cx| SqlPanel::new(window, cx));
         let import = cx.new(|cx| ImportPanel::new(window, cx));
 
@@ -298,6 +307,7 @@ impl Document {
             cx.subscribe(&goto, Self::on_goto_event),
             cx.subscribe_in(&filter_editor, window, Self::on_filter_event),
             cx.subscribe(&stats, Self::on_stats_event),
+            cx.subscribe_in(&chart, window, Self::on_chart_event),
             cx.subscribe_in(&sql, window, Self::on_sql_event),
             cx.subscribe_in(&import, window, Self::on_import_event),
         ];
@@ -310,6 +320,7 @@ impl Document {
             dataset: None,
             base: None,
             query_frame: None,
+            query_sql: None,
             view: None,
             source: Source::File,
             spec: ViewSpec::default(),
@@ -332,6 +343,7 @@ impl Document {
             pending_menu: None,
             pending_errors: Vec::new(),
             show_stats: false,
+            show_chart: false,
             show_sql: false,
             table,
             search,
@@ -341,6 +353,7 @@ impl Document {
             goto_open: false,
             filter_editor,
             stats,
+            chart,
             sql,
             import,
             _subscriptions: subscriptions,
@@ -389,6 +402,7 @@ impl Document {
             table.refresh(cx);
         });
         self.stats.update(cx, |stats, cx| stats.clear(cx));
+        self.chart.update(cx, |chart, cx| chart.clear(cx));
         self.import.update(cx, |panel, cx| panel.clear(cx));
 
         let path = self.path.clone();
@@ -631,6 +645,7 @@ impl Document {
         });
         self.sync_header_profile(cx);
         self.refresh_stats(cx);
+        self.refresh_chart(cx);
         cx.notify();
     }
 
@@ -1097,6 +1112,78 @@ impl Document {
         cx.notify();
     }
 
+    /// What the chart panel draws from: the frame on screen, once the file
+    /// is fully loaded.
+    fn chart_source(&self) -> Option<chart::Source> {
+        let dataset = self.dataset.clone().filter(|d| d.is_loaded())?;
+        let base = match self.source {
+            Source::Query => self.query_frame.as_ref(),
+            Source::File => self.base.as_ref(),
+        }?;
+        Some(chart::Source {
+            dataset,
+            frame: self.view.clone()?,
+            view: self.spec.clone(),
+            query: match self.source {
+                Source::Query => self.query_sql.clone(),
+                Source::File => None,
+            },
+            base: (base.id, base.rows),
+        })
+    }
+
+    /// Points the chart panel at the frame on screen.
+    fn refresh_chart(&mut self, cx: &mut Context<Self>) {
+        if !self.show_chart {
+            return;
+        }
+        if let Some(source) = self.chart_source() {
+            self.chart.update(cx, |chart, cx| chart.show(source, cx));
+        }
+    }
+
+    fn toggle_chart(&mut self, _: &ToggleChart, _: &mut Window, cx: &mut Context<Self>) {
+        self.show_chart = !self.show_chart;
+        if self.show_chart
+            && let Some(source) = self.chart_source()
+        {
+            let selected = self.selected_column.and_then(|col| self.column_name(col));
+            self.chart
+                .update(cx, |chart, cx| chart.open(source, selected.as_deref(), cx));
+        }
+        crate::refresh_menus(cx);
+        cx.notify();
+    }
+
+    pub fn chart_shown(&self) -> bool {
+        self.show_chart
+    }
+
+    fn on_chart_event(
+        &mut self,
+        _: &Entity<ChartPanel>,
+        event: &ChartEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            ChartEvent::AddFilter(filter) => self.add_filter(filter.clone(), cx),
+            ChartEvent::ShowSql(sql) => {
+                self.show_sql = true;
+                self.sql.update(cx, |panel, cx| {
+                    panel.set_query(sql.clone(), window, cx);
+                    panel.focus(window, cx);
+                });
+                crate::refresh_menus(cx);
+            }
+            ChartEvent::Close => {
+                self.show_chart = false;
+                crate::refresh_menus(cx);
+            }
+        }
+        cx.notify();
+    }
+
     fn toggle_sql(&mut self, _: &ToggleSql, window: &mut Window, cx: &mut Context<Self>) {
         self.show_sql = !self.show_sql;
         if self.show_sql {
@@ -1144,6 +1231,7 @@ impl Document {
         // Taken now, on the UI thread, so a late-starting older worker can't
         // interrupt this query (see `Dataset::query_with`).
         let ticket = dataset.query_ticket();
+        let sql_text = sql.clone();
         cx.spawn(async move |this, cx| {
             let outcome = cx
                 .background_spawn(async move { dataset.query_with(ticket, &sql) })
@@ -1161,6 +1249,7 @@ impl Document {
                         this.source = Source::Query;
                         this.reset_spec();
                         this.query_frame = Some(frame.clone());
+                        this.query_sql = Some(sql_text);
                         this.selected_column = None;
                         this.show_frame(frame, cx);
                         this.profile_view(cx);
@@ -1473,6 +1562,18 @@ impl Document {
                         .toggled(self.show_stats)
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.toggle_stats(&ToggleStats, window, cx)
+                        })),
+                )
+                .child(
+                    Button::new("toggle-chart")
+                        .ghost()
+                        .small()
+                        .icon(Icon::empty().path("icons/chart-line.svg"))
+                        .label("Chart")
+                        .tooltip("Chart (⇧⌘C)")
+                        .toggled(self.show_chart)
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.toggle_chart(&ToggleChart, window, cx)
                         })),
                 )
                 .child(
@@ -2190,6 +2291,9 @@ impl Document {
         if self.show_stats && self.stats.read(cx).is_loading() {
             return Some("computing the stats panel");
         }
+        if self.show_chart && self.chart.read(cx).is_loading() {
+            return Some("drawing the chart");
+        }
         if self.adjusting && self.import.read(cx).is_loading() {
             return Some("previewing the import");
         }
@@ -2208,6 +2312,27 @@ impl Document {
             .and_then(|f| f.columns.iter().position(|c| c.name == name))
             .unwrap_or_else(|| panic!("{} has no column named {name:?}", self.name));
         self.open_header_menu(col, point(px(360.), px(TOOLBAR_HEIGHT + 64.)), cx);
+    }
+
+    /// The chart panel, for steps that set its fields as a user would.
+    pub(crate) fn chart_panel(&self) -> Entity<ChartPanel> {
+        self.chart.clone()
+    }
+
+    /// Runs `sql` from the SQL drawer, as Run does.
+    pub(crate) fn run_sql(&mut self, sql: &str, cx: &mut Context<Self>) {
+        self.run_query(sql.to_string(), cx);
+    }
+
+    /// Searches the grid, as typing in the search field does.
+    pub(crate) fn search_for(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.spec.search = text.to_string();
+        self.apply(Busy::Searching, cx);
+    }
+
+    /// Adds a filter, as a column menu or a click on a chart bar does.
+    pub(crate) fn filter_by(&mut self, filter: Filter, cx: &mut Context<Self>) {
+        self.add_filter(filter, cx);
     }
 
     /// The column menu, for steps that use it as a user would.
@@ -2354,6 +2479,14 @@ impl Render for Document {
                         .flex_1()
                         .min_w_0()
                         .min_h_0()
+                        .when(self.show_chart, |this| {
+                            this.child(
+                                div()
+                                    .h(relative(CHART_SHARE))
+                                    .flex_shrink_0()
+                                    .child(self.chart.clone()),
+                            )
+                        })
                         .child(
                             div().flex_1().min_h_0().text_size(px(13.)).child(
                                 DataTable::new(&self.table)
@@ -2388,6 +2521,7 @@ impl Render for Document {
             .key_context(CONTEXT)
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::toggle_stats))
+            .on_action(cx.listener(Self::toggle_chart))
             .on_action(cx.listener(Self::toggle_sql))
             .on_action(cx.listener(Self::find))
             .on_action(cx.listener(Self::copy))

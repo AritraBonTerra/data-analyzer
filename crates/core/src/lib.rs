@@ -33,7 +33,13 @@
 //! [`OpenOptions::values`], or apply to an open file with
 //! [`Dataset::set_values`]; [`Dataset::fit`] says how many values a type
 //! would read before choosing it.
+//!
+//! Charts: [`ChartSpec::suggest`] picks a starting chart from the columns,
+//! the UI edits the spec, and [`Dataset::chart`] draws it from a frame as one
+//! grouped query (a sample for scatters), returning a [`Chart`] with series,
+//! axes, a title and footer notes. [`Chart::sql`] is its query for Show SQL.
 
+mod chart;
 mod clean;
 mod dataset;
 mod encoding;
@@ -44,6 +50,10 @@ mod layout;
 mod profile;
 mod sql;
 
+pub use chart::{
+    Aggregate, Axis, BarSort, Category, Chart, ChartKind, ChartSpec, DateUnit, MAX_Y, Point, Scale,
+    Series, Tick, XAxis,
+};
 pub use clean::{Conversion, Decimal, Fit, Guessed, NumberFormat, ReadAs, ValueOptions};
 pub use dataset::{
     Cancelled, Column, ColumnKind, Dataset, ExportFormat, Frame, OpenOptions, Page, QueryTicket,

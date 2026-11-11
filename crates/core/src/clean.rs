@@ -146,7 +146,7 @@ impl NumberFormat {
 }
 
 /// `1234567.50` as `1,234,567.50`.
-fn group_thousands(plain: &str) -> String {
+pub(crate) fn group_thousands(plain: &str) -> String {
     let (whole, fraction) = plain.split_at(plain.find('.').unwrap_or(plain.len()));
     let mut out = String::new();
     for (i, digit) in whole.chars().enumerate() {

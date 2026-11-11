@@ -70,6 +70,26 @@ pub fn palette(cx: &App) -> Palette {
     }
 }
 
+/// How many categorical colours charts have for their series.
+pub const SERIES_COLORS: usize = 6;
+
+/// The categorical colour in `slot` (below [`SERIES_COLORS`]), in a fixed
+/// order tuned for each appearance. Never cycled or generated.
+pub fn series_color(slot: usize, cx: &App) -> Hsla {
+    const DARK: [u32; SERIES_COLORS] = [0x3987e5, 0xd95926, 0x199e70, 0xc98500, 0xd55181, 0x9085e9];
+    const LIGHT: [u32; SERIES_COLORS] =
+        [0x2a78d6, 0xeb6834, 0x1baf7a, 0xeda100, 0xe87ba4, 0x6250d6];
+    let colors = if cx.theme().is_dark() { DARK } else { LIGHT };
+    rgb(colors[slot % SERIES_COLORS]).into()
+}
+
+/// The neutral grey of a chart's `Other` series: opaque, so overlapping
+/// dots never mix into colours the legend doesn't show.
+pub fn other_series(cx: &App) -> Hsla {
+    let theme = cx.theme();
+    theme.background.blend(theme.muted_foreground.opacity(0.55))
+}
+
 /// The glyph that marks a column's type in headers and the stats panel.
 pub fn kind_icon(kind: ColumnKind) -> &'static str {
     match kind {

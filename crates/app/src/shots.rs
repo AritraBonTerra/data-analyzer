@@ -1,7 +1,7 @@
 //! Offscreen screenshots of the real app, for checking UI work by eye.
 //!
 //! Each [`Scenario`] opens a file in the app's own `Workspace` view, with its
-//! theme, fonts and icons, in a 1180×760 window that Metal renders at 2× and
+//! theme, fonts and icons, in a 1180×760 window (or narrower) that Metal renders at 2× and
 //! never puts on screen. It runs the scenario's steps, drives every
 //! background job (open, load, profile, page fetches, stats) to completion,
 //! and writes `<name>.png`.
@@ -17,8 +17,9 @@
 //! `DA_SHOTS_DIR` is taken from the repo root.
 //!
 //! To add a scenario, add a line to [`scenarios`]: a name, a file (relative to
-//! the repo root), then any of `.light()`, `.select(column)`, `.action(A)` and
-//! `.with(|doc, window, cx| ...)` for anything the others don't cover.
+//! the repo root), then any of `.light()`, `.width(points)`, `.select(column)`,
+//! `.action(A)` and `.with(|doc, window, cx| ...)` for anything the others
+//! don't cover.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -30,9 +31,9 @@ use gpui_kit::{
     WindowBounds, WindowOptions, point, px, size,
 };
 
-use da_core::ReadAs;
+use da_core::{Aggregate, ChartKind, ChartSpec, Filter, FilterOp, ReadAs};
 
-use crate::document::{AdjustImport, Document, ToggleStats};
+use crate::document::{AdjustImport, Document, ToggleChart, ToggleStats};
 use crate::recent::RecentStore;
 use crate::workspace::Workspace;
 use crate::{Windows, document, filter, import, sql};
@@ -51,6 +52,22 @@ fn scenarios() -> Vec<Scenario> {
     let latin1 = format!("{MESSY}/08_latin1.csv");
     let guessed = "crates/core/tests/fixtures/ambiguous_dates.csv";
     let guessed_times = "crates/core/tests/fixtures/ambiguous_datetimes.csv";
+    let wide = format!("{MESSY}/07_wide_months.csv");
+    let months = [
+        "Jan 2026", "Feb 2026", "Mar 2026", "Apr 2026", "May 2026", "Jun 2026",
+    ];
+    // Thirty categories, so the bars stop at twenty and the rest are Other.
+    let many = generated(
+        "thirty-categories.csv",
+        std::iter::once("team,points".to_string())
+            .chain((1..=30).map(|i| format!("Team {i:02},{}", 100 + i * 37 % 300)))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    );
+    let words = generated(
+        "text-only.csv",
+        "name,city\nAda,London\nGrace,New York\nEdsger,Austin\nBarbara,Boston".into(),
+    );
     vec![
         Scenario::new("clean-sales", &sales),
         Scenario::new("clean-sales-stats", &sales)
@@ -178,6 +195,157 @@ fn scenarios() -> Vec<Scenario> {
                     menu.type_filter(">", "$1,000,000", window, cx)
                 })
             }),
+        // The chart panel.
+        Scenario::new("chart-bar", &sales)
+            .select("product")
+            .action(ToggleChart),
+        Scenario::new("chart-bar-light", &sales)
+            .light()
+            .select("product")
+            .action(ToggleChart),
+        Scenario::new("chart-bar-count", &sales)
+            .action(ToggleChart)
+            .with(chart(ChartKind::Bar, "region", &[], None)),
+        Scenario::new("chart-bar-colour", &sales)
+            .action(ToggleChart)
+            .with(chart(
+                ChartKind::Bar,
+                "product",
+                &["revenue"],
+                Some("region"),
+            )),
+        Scenario::new("chart-bar-colour-light", &sales)
+            .light()
+            .action(ToggleChart)
+            .with(chart(
+                ChartKind::Bar,
+                "product",
+                &["revenue"],
+                Some("region"),
+            )),
+        Scenario::new("chart-line", &sales)
+            .action(ToggleChart)
+            .with(chart(
+                ChartKind::Line,
+                "order_date",
+                &["revenue"],
+                Some("region"),
+            )),
+        Scenario::new("chart-line-light", &sales)
+            .light()
+            .action(ToggleChart)
+            .with(chart(
+                ChartKind::Line,
+                "order_date",
+                &["revenue"],
+                Some("region"),
+            )),
+        Scenario::new("chart-scatter", &sales)
+            .action(ToggleChart)
+            .with(chart(ChartKind::Scatter, "units", &["revenue"], None)),
+        Scenario::new("chart-histogram", &sales)
+            .select("unit_price")
+            .action(ToggleChart),
+        Scenario::new("chart-wide", &wide)
+            .action(ToggleChart)
+            .with(move |doc, _, cx| set_chart(doc, ChartKind::Bar, "Region", &months, None, cx)),
+        Scenario::new("chart-currency", &currency)
+            .action(ToggleChart)
+            .with(chart(ChartKind::Bar, "region", &["revenue"], None)),
+        Scenario::new("chart-filtered", &sales)
+            .select("product")
+            .action(ToggleChart)
+            .with(|doc, _, cx| {
+                doc.filter_by(
+                    Filter {
+                        column: "region".into(),
+                        op: FilterOp::Equals("North".into()),
+                    },
+                    cx,
+                )
+            }),
+        Scenario::new("chart-sql", &sales)
+            .with(|doc, _, cx| {
+                doc.run_sql(
+                    "SELECT region, sum(revenue) AS revenue FROM data GROUP BY region",
+                    cx,
+                )
+            })
+            .action(ToggleChart),
+        Scenario::new("chart-top20", &many).action(ToggleChart),
+        Scenario::new("chart-with-stats", &sales)
+            .select("product")
+            .action(ToggleStats)
+            .action(ToggleChart),
+        Scenario::new("chart-empty", &words)
+            .action(ToggleChart)
+            .with(|doc, _, cx| {
+                doc.chart_panel().update(cx, |panel, cx| {
+                    panel.set_spec(
+                        ChartSpec {
+                            kind: ChartKind::Scatter,
+                            ..ChartSpec::default()
+                        },
+                        cx,
+                    )
+                })
+            }),
+        Scenario::new("chart-no-rows", &sales)
+            .select("product")
+            .action(ToggleChart)
+            .with(|doc, _, cx| doc.search_for("no such thing", cx)),
+        Scenario::new("chart-tooltip", &sales)
+            .select("product")
+            .action(ToggleChart)
+            .with(hover),
+        // The narrowest window: a plot too small to draw in, which must not panic.
+        Scenario::new("chart-narrow", &sales)
+            .width(640.)
+            .action(ToggleStats)
+            .action(ToggleChart)
+            .with(chart(
+                ChartKind::Line,
+                "order_date",
+                &["revenue"],
+                Some("region"),
+            )),
+        Scenario::new("chart-histogram-units", &sales)
+            .select("units")
+            .action(ToggleChart)
+            .with(chart(ChartKind::Histogram, "units", &[], None)),
+        Scenario::new("chart-scatter-colour", &sales)
+            .action(ToggleChart)
+            .with(chart(
+                ChartKind::Scatter,
+                "units",
+                &["revenue"],
+                Some("product"),
+            )),
+        Scenario::new("chart-two-series", &wide)
+            .action(ToggleChart)
+            .with(move |doc, _, cx| {
+                doc.chart_panel().update(cx, |panel, cx| {
+                    panel.set_spec(
+                        ChartSpec {
+                            kind: ChartKind::Bar,
+                            x: Some("Region".into()),
+                            y: months[..2].iter().map(|m| m.to_string()).collect(),
+                            aggregate: Aggregate::Average,
+                            ..ChartSpec::default()
+                        },
+                        cx,
+                    )
+                })
+            }),
+        Scenario::new("chart-line-tooltip", &sales)
+            .action(ToggleChart)
+            .with(chart(
+                ChartKind::Line,
+                "order_date",
+                &["revenue"],
+                Some("region"),
+            ))
+            .with(hover),
         Scenario::new("adjusted-applied", &subtotals)
             .action(AdjustImport)
             .with(|doc, _, cx| {
@@ -187,6 +355,49 @@ fn scenarios() -> Vec<Scenario> {
                 })
             }),
     ]
+}
+
+/// Writes `text` to a scratch file for a scenario and returns its path.
+fn generated(name: &str, text: String) -> PathBuf {
+    let path = std::env::temp_dir().join(format!("da-shots-{name}"));
+    std::fs::write(&path, text).unwrap();
+    path
+}
+
+/// Sets the chart panel's fields, as picking them in its rail does.
+fn set_chart(
+    doc: &mut Document,
+    kind: ChartKind,
+    x: &str,
+    y: &[&str],
+    color: Option<&str>,
+    cx: &mut Context<Document>,
+) {
+    let spec = ChartSpec {
+        kind,
+        x: Some(x.into()),
+        y: y.iter().map(|y| y.to_string()).collect(),
+        color: color.map(Into::into),
+        ..ChartSpec::default()
+    };
+    doc.chart_panel()
+        .update(cx, |panel, cx| panel.set_spec(spec, cx));
+}
+
+/// A step that sets the chart panel's fields.
+fn chart(
+    kind: ChartKind,
+    x: &'static str,
+    y: &'static [&'static str],
+    color: Option<&'static str>,
+) -> impl FnOnce(&mut Document, &mut Window, &mut Context<Document>) {
+    move |doc, _, cx| set_chart(doc, kind, x, y, color, cx)
+}
+
+/// Hovers the chart's first mark, as the pointer would.
+fn hover(doc: &mut Document, _: &mut Window, cx: &mut Context<Document>) {
+    doc.chart_panel()
+        .update(cx, |panel, cx| panel.hover_first(cx));
 }
 
 /// Opens the Details popover, as clicking "Details" in the strip does.
@@ -210,6 +421,8 @@ struct Scenario {
     name: &'static str,
     file: PathBuf,
     mode: ThemeMode,
+    /// The window's width in points; its height is always [`WINDOW`]'s.
+    width: f32,
     steps: Vec<Step>,
 }
 
@@ -234,12 +447,18 @@ impl Scenario {
             name,
             file: repo_root().join(file),
             mode: ThemeMode::Dark,
+            width: WINDOW.0,
             steps: Vec::new(),
         }
     }
 
     fn light(mut self) -> Self {
         self.mode = ThemeMode::Light;
+        self
+    }
+
+    fn width(mut self, width: f32) -> Self {
+        self.width = width;
         self
     }
 
@@ -282,7 +501,7 @@ impl Scenario {
             let options = WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(Bounds {
                     origin: point(px(0.), px(0.)),
-                    size: size(px(WINDOW.0), px(WINDOW.1)),
+                    size: size(px(self.width), px(WINDOW.1)),
                 })),
                 focus: true,
                 show: false,

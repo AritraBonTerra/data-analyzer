@@ -147,13 +147,7 @@ fn distribution(
     top: usize,
 ) -> Result<Distribution> {
     let col = quote_ident(&column.name);
-    // Histograms bin a numeric projection of the value: itself, or epoch seconds for dates.
-    let numeric = match column.kind {
-        ColumnKind::Number => Some(format!("CAST({col} AS DOUBLE)")),
-        ColumnKind::Temporal => Some(format!("CAST(epoch({col}) AS DOUBLE)")),
-        _ => None,
-    };
-    if let Some(x) = numeric {
+    if let Some(x) = numeric(column) {
         let (lo, hi, distinct): (Option<f64>, Option<f64>, i64) = conn.query_row(
             // Bins span finite values only; ±inf and NaN would make the bin width non-finite.
             &format!(
@@ -167,22 +161,37 @@ fn distribution(
             return Ok(Distribution::Empty);
         };
         if distinct as u64 > FEW_DISTINCT && hi > lo && (hi - lo).is_finite() {
-            return histogram(conn, relation, &col, &x, lo, hi, bins);
+            let width = (hi - lo) / bins as f64;
+            let bins = histogram(conn, relation, &col, &x, lo, width, bins)?;
+            return Ok(Distribution::Histogram(bins));
         }
     }
     categories(conn, relation, &col, top)
 }
 
-fn histogram(
+/// The SQL that histograms bin for `column`: the value itself as a double,
+/// or epoch seconds for dates. `None` for columns that can't be binned.
+pub(crate) fn numeric(column: &Column) -> Option<String> {
+    let col = quote_ident(&column.name);
+    match column.kind {
+        ColumnKind::Number => Some(format!("CAST({col} AS DOUBLE)")),
+        ColumnKind::Temporal => Some(format!("CAST(epoch({col}) AS DOUBLE)")),
+        _ => None,
+    }
+}
+
+/// Counts the rows of `relation` in `bins` equal-width bins of `x` (see
+/// [`numeric`]) of `width` from `lo`; values past the last bin's end fall
+/// in the last bin. Shared by the Stats panel and chart histograms.
+pub(crate) fn histogram(
     conn: &Connection,
     relation: &str,
     col: &str,
     x: &str,
     lo: f64,
-    hi: f64,
+    width: f64,
     bins: usize,
-) -> Result<Distribution> {
-    let width = (hi - lo) / bins as f64;
+) -> Result<Vec<Bin>> {
     let mut stmt = conn.prepare(&format!(
         "SELECT least(CAST(floor(({x} - {lo}) / {width}) AS BIGINT), {last}) AS b,
                 count(*), CAST(min({col}) AS VARCHAR), CAST(max({col}) AS VARCHAR)
@@ -214,7 +223,7 @@ fn histogram(
             };
         }
     }
-    Ok(Distribution::Histogram(out))
+    Ok(out)
 }
 
 fn categories(conn: &Connection, relation: &str, col: &str, top: usize) -> Result<Distribution> {

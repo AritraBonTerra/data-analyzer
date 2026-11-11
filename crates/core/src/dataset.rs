@@ -230,6 +230,8 @@ pub struct Dataset {
     load_interrupt: Mutex<Option<Arc<InterruptHandle>>>,
     view_interrupt: Mutex<Option<Arc<InterruptHandle>>>,
     query_interrupt: Mutex<Option<Arc<InterruptHandle>>>,
+    /// The running [`Dataset::chart`]; a newer chart interrupts it.
+    pub(crate) chart_interrupt: Mutex<Option<Arc<InterruptHandle>>>,
     /// The most recently issued [`QueryTicket`]; older tickets are stale.
     latest_query: AtomicU64,
     notice: Mutex<Option<String>>,
@@ -300,6 +302,7 @@ impl Dataset {
             load_interrupt: Mutex::new(None),
             view_interrupt: Mutex::new(None),
             query_interrupt: Mutex::new(None),
+            chart_interrupt: Mutex::new(None),
             latest_query: AtomicU64::new(0),
             notice: Mutex::new(None),
         };
@@ -1114,7 +1117,10 @@ fn process_alive(pid: i32) -> bool {
 
 /// Whether `handle` still belongs to the latest call. Newer calls replace it,
 /// and cancelling removes it.
-fn is_current(slot: &Mutex<Option<Arc<InterruptHandle>>>, handle: &Arc<InterruptHandle>) -> bool {
+pub(crate) fn is_current(
+    slot: &Mutex<Option<Arc<InterruptHandle>>>,
+    handle: &Arc<InterruptHandle>,
+) -> bool {
     slot.lock()
         .unwrap()
         .as_ref()
