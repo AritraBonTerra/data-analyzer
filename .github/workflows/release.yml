@@ -1,4 +1,4 @@
-# Builds, signs and publishes a release when a tag v<version> is pushed.
+# Builds, signs, notarizes and publishes a release when a tag v<version> is pushed.
 # A tag v<version>-dryrun.<n> runs every step except publishing, and keeps the
 # DMG and latest.json as workflow artifacts instead.
 name: Release
@@ -61,10 +61,43 @@ jobs:
       - run: cargo test --workspace --release
         timeout-minutes: 30
 
-      # Signed ad hoc. For Developer ID signing and notarization, import the
-      # certificate from secrets here, set SIGN_IDENTITY to it and pass --notarize.
-      - name: Build app and DMG
-        run: SIGN_IDENTITY=- scripts/bundle.sh
+      # Puts the Developer ID certificate in a throwaway keychain, made the default so
+      # bundle.sh finds the identity and notarytool finds the `data-analyzer` profile.
+      # The runner is discarded after the job, keychain included.
+      - name: Load the signing certificate and notary key
+        env:
+          MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+          NOTARY_KEY: ${{ secrets.NOTARY_KEY }}
+          NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
+        run: |
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          pass=$(uuidgen)
+          security create-keychain -p "$pass" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$pass" "$keychain"
+          security list-keychains -d user -s "$keychain" login.keychain
+          security default-keychain -s "$keychain"
+
+          # Apple's intermediate, in case the export left it out.
+          curl -fsSL https://www.apple.com/certificateauthority/DeveloperIDG2CA.cer -o "$RUNNER_TEMP/ca.cer"
+          security import "$RUNNER_TEMP/ca.cer" -k "$keychain"
+
+          printf '%s' "$MACOS_CERT_P12" | base64 --decode >"$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$keychain" -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$pass" "$keychain" >/dev/null
+          security find-identity -v -p codesigning "$keychain"
+
+          printf '%s\n' "$NOTARY_KEY" >"$RUNNER_TEMP/notary.p8"
+          xcrun notarytool store-credentials data-analyzer --key "$RUNNER_TEMP/notary.p8" \
+            --key-id "$NOTARY_KEY_ID" --issuer "$NOTARY_ISSUER_ID" --keychain "$keychain"
+          rm -f "$RUNNER_TEMP/cert.p12" "$RUNNER_TEMP/notary.p8"
+
+      # Signs with the Developer ID loaded above; Apple notarizes the app and DMG
+      # and both get the ticket stapled, so macOS opens them without a warning.
+      - name: Build, sign and notarize app and DMG
+        run: scripts/bundle.sh --notarize
 
       - name: Sign DMG and write latest.json
         env:

@@ -1487,7 +1487,7 @@ dependencies = [
 
 [[package]]
 name = "da-core"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "calamine",
@@ -1497,7 +1497,7 @@ dependencies = [
 
 [[package]]
 name = "data-analyzer"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "block2 0.6.2",
