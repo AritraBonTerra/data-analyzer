@@ -27,7 +27,7 @@ Measured on an M4 Pro with a 2.4 GB, 30M-row CSV (release build, warm disk): fir
 
 ## Install
 Download the DMG from the [Releases page](https://github.com/AritraBonTerra/data-analyzer/releases) and drag Data Analyzer to Applications (Apple Silicon only).
-The app is not signed with an Apple Developer ID, so macOS blocks the first launch of a downloaded build: allow it once under System Settings, Privacy & Security.
+Releases from 0.2.1 on are signed with a Developer ID and notarized by Apple, so macOS opens them without a warning.
 
 Updates: each time the app opens it asks GitHub whether a newer release exists, and offers to install it. Install downloads the new version,
 checks its signature, swaps the app and relaunches with the same files open. Nothing but that one request is sent.
@@ -63,7 +63,7 @@ To release:
 1. Bump `version` in `crates/app/Cargo.toml` and merge it to `main`.
 2. Tag `main`: `git switch main && git pull && git tag v0.2.1 && git push origin v0.2.1`. The tag must be `v` plus that version, on a commit that is in `main`.
 
-`.github/workflows/release.yml` then checks, tests and builds the app on GitHub, and publishes a release with
+`.github/workflows/release.yml` then checks, tests, builds, signs and notarizes the app on GitHub, and publishes a release with
 notes generated from the merged pull requests, `Data-Analyzer-<version>.dmg` and `latest.json` (version,
 download link, size, SHA-256 and update signature). The run is under the Actions tab and takes about 25 minutes.
 If any step fails, nothing is published.
@@ -76,3 +76,8 @@ Update key: each DMG is signed with an SSH key, and the signature goes in `lates
 the private half is the repo secret `UPDATE_SIGNING_KEY`. GitHub never shows a secret again, so keep a copy of the private key
 somewhere safe. If it is lost, make a new pair;
 installed apps then need one manual reinstall of a build that carries the new public key.
+
+Apple signing: the release run signs with a Developer ID Application certificate and notarizes through an App Store Connect
+API key. Repo secrets: `MACOS_CERT_P12` (the certificate and its private key as a base64 `.p12`), `MACOS_CERT_PASSWORD`,
+`NOTARY_KEY` (the `.p8` file), `NOTARY_KEY_ID` and `NOTARY_ISSUER_ID`. When the certificate expires, export the renewed one
+and set the first two again: `base64 -i cert.p12 | gh secret set MACOS_CERT_P12`.
