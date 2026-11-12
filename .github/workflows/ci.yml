@@ -44,4 +44,6 @@ jobs:
 
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
+      # Normally about 6 minutes. The limit stops a hung test from holding the run for an hour.
       - run: cargo test --workspace
+        timeout-minutes: 30
