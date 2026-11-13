@@ -72,20 +72,20 @@ scripts/appimage.sh             # Linux: dist/Data-Analyzer-<arch>.AppImage
 
 ## Releasing
 Every pull request and every push to `main` runs format, lint and tests on macOS and Linux (`.github/workflows/ci.yml`).
-To release:
-1. Bump `version` in `crates/app/Cargo.toml` and merge it to `main`.
-2. Tag `main`: `git switch main && git pull && git tag v0.2.1 && git push origin v0.2.1`. The tag must be `v` plus that version, on a commit that is in `main`.
+To release, bump `version` in `crates/app/Cargo.toml` (and `crates/core/Cargo.toml`) in a pull request and merge it.
+A merge that leaves the version alone releases nothing: each push to `main` runs `.github/workflows/release.yml`,
+which stops after its first job when `v<version>` is already released.
 
-`.github/workflows/release.yml` then checks, tests, builds, signs and notarizes the macOS app, and checks, tests and
-builds the Linux AppImages (x86_64 and aarch64, each on a runner of that architecture), all on GitHub. It publishes a release with
+For a new version it checks, tests, builds, signs and notarizes the macOS app, and checks, tests and
+builds the Linux AppImages (x86_64 and aarch64, each on a runner of that architecture), all on GitHub. It tags the merged commit `v<version>` and publishes a release with
 notes generated from the merged pull requests and, per platform, the app and the manifest its updater reads (version,
 download link, size, SHA-256 and update signature): `Data-Analyzer-<version>.dmg` with `latest.json`, and
 `Data-Analyzer-<arch>.AppImage` with `latest-linux-<arch>.json`. The run is under the Actions tab and takes about 25 minutes.
 If any step fails, nothing is published.
 
-Trial run: push a tag like `v0.2.1-dryrun.1`. It runs every step but publishing, and the DMG, the AppImages and
+Trial run: push a tag like `v0.2.2-dryrun.1` (`v` plus the version, from any branch). It runs every step but publishing, and the DMG, the AppImages and
 their manifests appear as artifacts on the workflow run. Delete the tag afterwards
-(`git tag -d v0.2.1-dryrun.1 && git push origin --delete v0.2.1-dryrun.1`).
+(`git tag -d v0.2.2-dryrun.1 && git push origin --delete v0.2.2-dryrun.1`).
 
 Update key: each DMG and AppImage is signed with an SSH key, and the signature goes in its manifest. The public half is `packaging/update-key.pub`;
 the private half is the repo secret `UPDATE_SIGNING_KEY`. GitHub never shows a secret again, so keep a copy of the private key
