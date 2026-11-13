@@ -23,6 +23,7 @@ A free, native app for macOS and Linux for opening and exploring data files: CSV
 - **Finds the table.** Titles, notes and totals rows around a table are set aside and kept under File notes; multi-row headers are joined; two tables in one file or sheet become two tabs. One line under the toolbar says what was done, and *Adjust import* corrects a wrong guess.
 - **Nested data.** A JSON file that wraps its records opens as rows, and nested objects in JSON and Parquet open into columns like `customer.address.city`.
 - **Excel sheets** as tabs. **Default app** for data files via *Data Analyzer → Make Default for Data Files…* (on Linux, *Help → Make Default for Data Files…*, which also adds the app to your app menu).
+- **Settings** (⌘, or Ctrl+,): light, dark or system appearance, four themes, and every shortcut can be changed. **Zoom** with ⌘+ / ⌘− / ⌘0 makes text, rows and panels bigger or smaller in every window.
 
 Measured on an M4 Pro with a 2.4 GB, 30M-row CSV (release build, warm disk): first rows in 170 ms, full load in 3.5 s, any page in about 4 ms, sort in 2.2 s, search in 1 s.
 
