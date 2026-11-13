@@ -203,6 +203,18 @@ impl SettingsView {
             });
             return cx.notify();
         }
+        if let Some(fixed) = keymap::reserved_by(keystroke, cx) {
+            self.note = Some(Note {
+                id,
+                text: format!(
+                    "{} is {fixed}, which can't be changed. Try another.",
+                    keymap::display(&keystroke.unparse(cx.platform_info().os), cx)
+                )
+                .into(),
+                problem: true,
+            });
+            return cx.notify();
+        }
         self.recording = None;
         self.note = keymap::assign(id, Some(keystroke), cx).map(|other| Note {
             id,
@@ -896,6 +908,19 @@ mod tests {
         // Recording is over: ⌘Q now goes to the keymap, where Quit no longer has it.
         cx.simulate_keystrokes("cmd-q");
         assert_eq!(quits.get(), 0);
+        // ⌘C is the grid's Copy, which can't be moved, so recording refuses it.
+        let bounds = cx.debug_bounds("shortcut-open").expect("Open's shortcut");
+        cx.simulate_click(bounds.center(), Modifiers::none());
+        cx.simulate_keystrokes("cmd-c");
+        let open = cx.update(|_, cx| keymap::shortcuts(command("open").unwrap(), cx));
+        assert_eq!(open, ["secondary-o"], "⌘C was taken from Copy");
+        let note = cx.update(|_, cx| view.read(cx).note.as_ref().map(|n| n.text.clone()));
+        assert_eq!(
+            note.as_deref(),
+            Some("⌘C is Copy, which can't be changed. Try another.")
+        );
+        cx.simulate_keystrokes("escape");
+
         // Putting Quit back takes ⌘Q from Find rather than sharing it.
         cx.update(|_, cx| keymap::reset("quit", cx));
         let find = cx.update(|_, cx| keymap::shortcuts(command("find").unwrap(), cx));

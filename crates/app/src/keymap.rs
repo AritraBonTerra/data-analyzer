@@ -262,6 +262,38 @@ pub fn can_bind(keystroke: &Keystroke) -> bool {
     !modifier_only && (m.platform || m.control || m.alt || function_key)
 }
 
+/// The fixed binding that already uses `keystroke`, named for people
+/// ("Copy", "Select All"). A fixed binding sits in a deeper key context than
+/// the commands (the grid, a text field), so it would take the key first.
+/// A command's own default never counts: those are known to work.
+pub fn reserved_by(keystroke: &Keystroke, cx: &App) -> Option<String> {
+    let is_default = COMMANDS
+        .iter()
+        .flat_map(|c| c.defaults)
+        .any(|keys| parse(keys, cx).is_some_and(|keys| same_keys(&keys, keystroke)));
+    if is_default {
+        return None;
+    }
+    let binding = cx.try_global::<BaseKeymap>()?.0.iter().find(
+        |binding| matches!(binding.keystrokes(), [only] if same_keys(only.inner(), keystroke)),
+    )?;
+    // `input::SelectAll` → "Select All".
+    let name = binding
+        .action()
+        .name()
+        .rsplit("::")
+        .next()
+        .unwrap_or_default();
+    let mut words = String::new();
+    for c in name.chars() {
+        if c.is_uppercase() && !words.is_empty() {
+            words.push(' ');
+        }
+        words.push(c);
+    }
+    Some(words)
+}
+
 /// Whether two keystrokes press the same keys. A recorded keystroke also
 /// carries the character it typed (`key_char`), which a parsed one doesn't.
 fn same_keys(a: &Keystroke, b: &Keystroke) -> bool {
