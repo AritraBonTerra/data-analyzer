@@ -1,30 +1,30 @@
 //! The app updates itself from its GitHub releases.
 //!
 //! The engine (first half) has no UI types. Its steps are plain blocking
-//! functions that call the system's own tools by absolute path: [`check`]
-//! reads the newest release's `latest.json`, [`download`] fetches its DMG,
-//! [`verify`] checks size, SHA-256 and the SSH signature, [`stage`] copies the
-//! app out of the DMG beside the installed one and checks its bundle id,
-//! version and code signature ([`prepare`] runs those three), [`swap`]
-//! exchanges it with the installed app and [`relaunch`] starts it.
-//! [`clean_up`] removes what dead processes left. `data-analyzer --update`
-//! runs them in a row ([`run_cli`]). Nothing persists between launches.
+//! functions: [`check`] reads the newest release's manifest for this
+//! platform, [`download`] fetches its asset (a DMG on macOS, an AppImage on
+//! Linux), [`verify`] checks size, SHA-256 and the SSH signature, [`stage`]
+//! puts a checked copy of the new app beside the installed one ([`prepare`]
+//! runs those three), [`swap`] puts it in place of the installed app and
+//! [`relaunch`] starts it. [`clean_up`] removes what dead processes left.
+//! `data-analyzer --update` runs them in a row ([`run_cli`]). Nothing
+//! persists between launches. How each step is done on each platform is in
+//! `update/macos.rs` and `update/linux.rs`.
 //!
 //! The UI half ([`Updater`]) runs the same steps on the background executor
 //! and shows one prompt card for the whole app, in the active window.
 //!
 //! Where updates come from and which key signs them are fixed at compile time
 //! (`DA_UPDATE_BASE`, `DA_UPDATE_KEY`); nothing at run time can change them.
-//! The updater is inert unless the executable runs inside a `.app` bundle.
+//! The updater is inert unless the app runs installed: from a `.app` bundle
+//! on macOS, from an AppImage on Linux.
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
 
-use anyhow::{Context as _, Result, bail, ensure};
+use anyhow::{Context as _, Result, ensure};
 use futures::StreamExt;
 use gpui_kit::component::WindowExt;
 use gpui_kit::component::button::{Button, ButtonVariants};
@@ -38,21 +38,29 @@ use sha2::{Digest, Sha256};
 use crate::platform;
 use crate::theme::{self, tabular};
 
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(target_os = "linux")]
+use linux as os;
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg(target_os = "macos")]
+use macos as os;
+
+pub use os::running_app;
+
 /// The running app's version, as in `crates/app/Cargo.toml`.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// The app's name inside a release DMG, and the name it is installed under.
-const DMG_APP: &str = "Data Analyzer.app";
+/// The SSH signature namespace release assets are signed under.
+const NAMESPACE: &str = "data-analyzer-update";
 
-/// The one sentence shown when the app can't replace itself where it is.
-const MOVE_TO_APPLICATIONS: &str = "Move Data Analyzer to Applications to update it.";
-
-/// Where updates come from and the public key their DMGs are signed with.
+/// Where updates come from and the public key their assets are signed with.
 /// The app only ever uses [`Source::built_in`]; tests make their own.
 #[derive(Clone, Debug)]
 pub struct Source {
-    /// A releases URL: the manifest is `<base>/latest/download/latest.json`
-    /// and every DMG must be under `<base>/download/`.
+    /// A releases URL: the manifest is `<base>/latest/download/<manifest>`
+    /// and every asset must be under `<base>/download/`.
     pub base: String,
     /// An OpenSSH public key line: `<type> <base64> [comment]`.
     pub key: String,
@@ -72,8 +80,10 @@ impl Source {
         }
     }
 
+    /// This platform's manifest: `latest.json` on macOS,
+    /// `latest-linux-<arch>.json` on Linux.
     fn manifest_url(&self) -> String {
-        format!("{}/latest/download/latest.json", self.base)
+        format!("{}/latest/download/{}", self.base, os::MANIFEST)
     }
 
     /// curl's `--proto`: HTTPS only, unless the base itself is a local test server.
@@ -86,13 +96,17 @@ impl Source {
     }
 }
 
-/// A release's `latest.json`. Missing keys are rejected; keys a later
-/// release adds are ignored, so older apps can still read it.
+/// A release's manifest. Missing keys are rejected; keys a later release
+/// adds are ignored, so older apps can still read it. The asset's key names
+/// its kind: `dmg` on macOS (as every macOS release so far wrote it),
+/// `appimage` on Linux.
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 #[cfg_attr(test, derive(serde::Serialize))]
 pub struct Manifest {
     pub version: String,
-    pub dmg: String,
+    #[cfg_attr(target_os = "macos", serde(rename = "dmg"))]
+    #[cfg_attr(target_os = "linux", serde(rename = "appimage"))]
+    pub asset: String,
     pub size: u64,
     pub sha256: String,
     pub signature: String,
@@ -100,7 +114,7 @@ pub struct Manifest {
 }
 
 impl Manifest {
-    /// Parses `latest.json` and checks every field against `source`.
+    /// Parses a manifest and checks every field against `source`.
     pub fn parse(text: &str, source: &Source) -> Result<Self> {
         let manifest: Self =
             serde_json::from_str(text).context("The update manifest is malformed")?;
@@ -112,10 +126,10 @@ impl Manifest {
         })?;
         ensure!(
             manifest
-                .dmg
+                .asset
                 .starts_with(&format!("{}/download/", source.base)),
             "The update manifest points somewhere else: {}",
-            manifest.dmg
+            manifest.asset
         );
         ensure!(
             manifest.notes.starts_with(&format!("{}/", source.base)),
@@ -158,126 +172,38 @@ pub fn newer(text: &str, source: &Source, current: &str) -> Result<Option<Manife
 /// Reads the newest release's manifest (10 second limit). Returns it if it
 /// offers a version newer than this app.
 pub fn check(source: &Source) -> Result<Option<Manifest>> {
-    let output = curl(source)
-        .args(["--max-time", "10", "--max-filesize", "65536"])
-        .arg(source.manifest_url())
-        .output()
-        .context("Couldn't run curl")?;
-    ensure!(
-        output.status.success(),
-        "Couldn't check for updates: {}",
-        String::from_utf8_lossy(&output.stderr).trim()
-    );
-    newer(&String::from_utf8_lossy(&output.stdout), source, VERSION)
-}
-
-/// `/usr/bin/curl` set up the same way for every request.
-fn curl(source: &Source) -> Command {
-    let mut command = Command::new("/usr/bin/curl");
-    command
-        .args(["--fail", "--location", "--silent", "--show-error"])
-        .args(["--proto", source.protocols()])
-        .stdin(Stdio::null());
-    command
+    newer(&os::fetch_manifest(source)?, source, VERSION)
 }
 
 /// The error a cancelled install ends with.
 const CANCELLED: &str = "Cancelled.";
 
-/// Downloads the manifest's DMG to `dest`. About five times a second it
-/// calls `progress` with the bytes so far; when that returns `false`, curl is
-/// killed and the partial file deleted.
+/// Downloads the manifest's asset to `dest`. About five times a second it
+/// calls `progress` with the bytes so far; when that returns `false`, the
+/// download stops and the partial file is deleted.
 pub fn download(
     source: &Source,
     manifest: &Manifest,
     dest: &Path,
-    mut progress: impl FnMut(u64) -> bool,
+    progress: impl FnMut(u64) -> bool,
 ) -> Result<()> {
-    if let Some(dir) = dest.parent() {
-        fs::create_dir_all(dir)?;
-    }
-    let _ = fs::remove_file(dest);
-    let mut child = curl(source)
-        .args(["--max-filesize", &manifest.size.to_string()])
-        // Give up on a stalled connection rather than wait forever.
-        .args(["--speed-limit", "1024", "--speed-time", "30"])
-        .arg("--output")
-        .arg(dest)
-        .arg(&manifest.dmg)
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .context("Couldn't run curl")?;
-    loop {
-        if child.try_wait()?.is_some() {
-            break;
-        }
-        let done = fs::metadata(dest).map(|m| m.len()).unwrap_or(0);
-        if !progress(done) {
-            let _ = child.kill();
-            let _ = child.wait();
-            let _ = fs::remove_file(dest);
-            bail!(CANCELLED);
-        }
-        std::thread::sleep(Duration::from_millis(200));
-    }
-    let output = child.wait_with_output()?;
-    if !output.status.success() {
-        let _ = fs::remove_file(dest);
-        bail!(
-            "Couldn't download the update: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
-    Ok(())
+    os::download(source, manifest, dest, progress)
 }
 
-/// Checks the downloaded DMG: its size and SHA-256 against the manifest, then
-/// its signature against `source`'s key with `ssh-keygen -Y verify`.
-pub fn verify(source: &Source, manifest: &Manifest, dmg: &Path) -> Result<()> {
-    let size = fs::metadata(dmg)?.len();
+/// Checks the downloaded asset: its size and SHA-256 against the manifest,
+/// then its signature against `source`'s key.
+pub fn verify(source: &Source, manifest: &Manifest, file: &Path) -> Result<()> {
+    let size = fs::metadata(file)?.len();
     ensure!(
         size == manifest.size,
         "The download is {size} bytes, not the {} the release lists.",
         manifest.size
     );
     ensure!(
-        sha256(dmg)? == manifest.sha256,
+        sha256(file)? == manifest.sha256,
         "The download's checksum doesn't match the release."
     );
-
-    let mut key = source.key.split_whitespace();
-    let (Some(kind), Some(data)) = (key.next(), key.next()) else {
-        bail!("The app's update key is malformed.");
-    };
-    let signers = dmg.with_extension("signers");
-    let signature = dmg.with_extension("sig");
-    fs::write(&signers, format!("data-analyzer {kind} {data}\n"))?;
-    fs::write(&signature, &manifest.signature)?;
-    let status = Command::new("/usr/bin/ssh-keygen")
-        .args([
-            "-Y",
-            "verify",
-            "-I",
-            "data-analyzer",
-            "-n",
-            "data-analyzer-update",
-        ])
-        .arg("-f")
-        .arg(&signers)
-        .arg("-s")
-        .arg(&signature)
-        .stdin(fs::File::open(dmg)?)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
-    let _ = fs::remove_file(&signers);
-    let _ = fs::remove_file(&signature);
-    ensure!(
-        status.context("Couldn't run ssh-keygen")?.success(),
-        "The download isn't signed with the app's update key."
-    );
-    Ok(())
+    os::verify_signature(source, &manifest.signature, file)
 }
 
 /// The lowercase hex SHA-256 of a file.
@@ -300,90 +226,11 @@ fn sha256(path: &Path) -> Result<String> {
         .collect())
 }
 
-/// Mounts the verified DMG read-only at `mount`, copies its app to `staged`,
-/// and checks the copy: bundle id, version equal to `version`, and code
-/// signature. On any failure no staged copy is left.
-pub fn stage(version: &str, dmg: &Path, mount: &Path, staged: &Path) -> Result<()> {
-    let _ = fs::remove_dir_all(staged);
-    fs::create_dir_all(mount)?;
-    run(Command::new("/usr/bin/hdiutil")
-        .args([
-            "attach",
-            "-nobrowse",
-            "-readonly",
-            "-noautoopen",
-            "-mountpoint",
-        ])
-        .arg(mount)
-        .arg(dmg))
-    .context("Couldn't open the downloaded disk image")?;
-    let copied = run(Command::new("/usr/bin/ditto")
-        .arg(mount.join(DMG_APP))
-        .arg(staged))
-    .context("Couldn't copy the app out of the disk image");
-    detach(mount);
-
-    let checked = copied.and_then(|()| check_bundle(staged, version));
-    if checked.is_err() {
-        let _ = fs::remove_dir_all(staged);
-    }
-    checked
-}
-
-/// Force-detaches a disk image mounted at `mount` and removes the folder.
-fn detach(mount: &Path) {
-    let _ = run(Command::new("/usr/bin/hdiutil")
-        .args(["detach", "-force"])
-        .arg(mount));
-    let _ = fs::remove_dir(mount);
-}
-
-/// Checks that `app` is Data Analyzer at `version` and that its code
-/// signature holds. The version check stops an older signed release from
-/// being replayed as a newer one.
-pub fn check_bundle(app: &Path, version: &str) -> Result<()> {
-    let (id, found) = bundle_info(app)?;
-    ensure!(
-        id == platform::BUNDLE_ID,
-        "The update isn't Data Analyzer (its bundle id is {id})."
-    );
-    ensure!(
-        found == version,
-        "The update holds version {found}, not the {version} the release lists."
-    );
-    run(Command::new("/usr/bin/codesign")
-        .args(["--verify", "--deep", "--strict"])
-        .arg(app))
-    .context("The update's code signature doesn't hold")?;
-    Ok(())
-}
-
-/// A bundle's `CFBundleIdentifier` and `CFBundleShortVersionString`.
-fn bundle_info(app: &Path) -> Result<(String, String)> {
-    let plist = app.join("Contents/Info.plist");
-    let read = |key: &str| -> Result<String> {
-        let output = Command::new("/usr/bin/plutil")
-            .args(["-extract", key, "raw", "-o", "-"])
-            .arg(&plist)
-            .output()?;
-        ensure!(output.status.success(), "{} has no {key}.", app.display());
-        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-    };
-    Ok((
-        read("CFBundleIdentifier")?,
-        read("CFBundleShortVersionString")?,
-    ))
-}
-
-/// Runs a system tool, turning a failure into an error with its stderr.
-fn run(command: &mut Command) -> Result<()> {
-    let output = command.stdin(Stdio::null()).output()?;
-    ensure!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr).trim()
-    );
-    Ok(())
+/// Puts a checked copy of the app in the verified asset `file` at `staged`,
+/// using `scratch` for any working files. The copy must report `version`. On
+/// any failure no staged copy is left.
+pub fn stage(version: &str, file: &Path, scratch: &Path, staged: &Path) -> Result<()> {
+    os::stage(version, file, scratch, staged)
 }
 
 /// The scratch folder and the staged sibling of one install, tagged
@@ -395,6 +242,15 @@ pub fn install_paths(updates: &Path, app: &Path, n: u64) -> (PathBuf, PathBuf) {
     let name = app.file_name().unwrap_or_default().to_string_lossy();
     let staged = app.with_file_name(format!(".{name}.update-{tag}"));
     (updates.join(tag), staged)
+}
+
+/// Removes a staged app (a folder on macOS, a file on Linux) or a leftover.
+fn remove(path: &Path) {
+    if path.is_dir() {
+        let _ = fs::remove_dir_all(path);
+    } else {
+        let _ = fs::remove_file(path);
+    }
 }
 
 /// Downloads, verifies and stages one update, logging each step. `cancel`
@@ -413,77 +269,53 @@ pub fn prepare(
         ensure!(!cancel.load(Ordering::Relaxed), CANCELLED);
         Ok(())
     };
-    let dmg = dir.join("update.dmg");
+    let file = dir.join(os::DOWNLOAD);
     let mut steps = || -> Result<()> {
-        log(&format!("Downloading {}", manifest.dmg));
-        download(source, manifest, &dmg, |done| {
+        log(&format!("Downloading {}", manifest.asset));
+        download(source, manifest, &file, |done| {
             progress(done);
             !cancel.load(Ordering::Relaxed)
         })?;
         go_on()?;
         log("Verifying checksum and signature");
-        verify(source, manifest, &dmg)?;
+        verify(source, manifest, &file)?;
         go_on()?;
         log(&format!("Staging {}", staged.display()));
-        stage(&manifest.version, &dmg, &dir.join("mount"), staged)?;
+        stage(&manifest.version, &file, dir, staged)?;
         go_on()
     };
     let result = steps();
-    let _ = fs::remove_dir_all(dir);
+    os::remove_scratch(dir);
     if result.is_err() {
-        let _ = fs::remove_dir_all(staged);
+        remove(staged);
     }
     result
 }
 
 /// Puts the staged copy in place of `app`, if it is newer than the app on
-/// disk right now (another instance may have updated it already).
-///
-/// The two folders trade places in one `renamex_np(RENAME_SWAP)`, so `app`
-/// always holds a whole app, old or new, and a failure moves nothing.
-/// Afterwards the old app sits at `staged`; [`clean_up`] deletes it at a
-/// later launch. The exchange isn't flushed to disk: after a power cut
-/// either app may be the one at `app`.
+/// disk right now (another instance may have updated it already). `app`
+/// always holds a whole app, old or new, and a failure moves nothing; on
+/// macOS the old app is left at `staged` for [`clean_up`].
 pub fn swap(app: &Path, staged: &Path) -> Result<()> {
-    let (_, installed) = bundle_info(app)?;
-    let (_, update) = bundle_info(staged)?;
+    let installed = os::installed_version(app)?;
+    let update = os::installed_version(staged)?;
     ensure!(
         is_newer(&update, &installed)?,
         "Data Analyzer is already {installed}."
     );
-    exchange(staged, app).context("Couldn't move the update into place")
+    os::replace(staged, app).context("Couldn't move the update into place")
 }
 
-/// Swaps two paths on one volume atomically.
-fn exchange(a: &Path, b: &Path) -> std::io::Result<()> {
-    use std::ffi::CString;
-    use std::os::unix::ffi::OsStrExt;
-    let a = CString::new(a.as_os_str().as_bytes())?;
-    let b = CString::new(b.as_os_str().as_bytes())?;
-    // SAFETY: both are NUL-terminated paths that outlive the call.
-    if unsafe { libc::renamex_np(a.as_ptr(), b.as_ptr(), libc::RENAME_SWAP) } != 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    Ok(())
-}
-
-/// Starts a new instance of `app` with `files` open and returns once macOS
-/// has started it.
+/// Starts a new instance of `app` with `files` open and returns once it has
+/// started.
 pub fn relaunch(app: &Path, files: &[PathBuf]) -> Result<()> {
-    run(Command::new("/usr/bin/open")
-        .arg("-n")
-        .arg(app)
-        .arg("--args")
-        .args(files))
-    .context("Couldn't start the new version")
+    os::relaunch(app, files)
 }
 
 /// Deletes what updaters in processes that are no longer running left
-/// behind: scratch folders under `updates` (detaching a disk image still
-/// mounted in one) and staged siblings of `app`, including the old app a
-/// swap leaves there. Call once per launch.
+/// behind: scratch folders under `updates` and staged siblings of `app`,
+/// including the old app a macOS swap leaves there. Call once per launch.
 pub fn clean_up(updates: &Path, app: &Path) {
-    use std::os::unix::fs::MetadataExt;
     let dead = |tag: &str| {
         tag.split('-')
             .next()
@@ -492,14 +324,7 @@ pub fn clean_up(updates: &Path, app: &Path) {
     };
     for entry in fs::read_dir(updates).into_iter().flatten().flatten() {
         if dead(&entry.file_name().to_string_lossy()) {
-            let mount = entry.path().join("mount");
-            let mounted = fs::metadata(&mount)
-                .and_then(|m| Ok(m.dev() != fs::metadata(entry.path())?.dev()))
-                .unwrap_or(false);
-            if mounted {
-                detach(&mount);
-            }
-            let _ = fs::remove_dir_all(entry.path());
+            os::remove_scratch(&entry.path());
         }
     }
     let (Some(folder), Some(name)) = (app.parent(), app.file_name()) else {
@@ -511,7 +336,7 @@ pub fn clean_up(updates: &Path, app: &Path) {
         if let Some(tag) = file.to_string_lossy().strip_prefix(&prefix)
             && dead(tag)
         {
-            let _ = fs::remove_dir_all(entry.path());
+            remove(&entry.path());
         }
     }
 }
@@ -523,23 +348,8 @@ fn process_alive(pid: i32) -> bool {
     alive || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
-/// The `.app` this executable runs from, or `None` in a developer build.
-pub fn running_app() -> Option<PathBuf> {
-    let exe = std::env::current_exe().ok()?.canonicalize().ok()?;
-    let macos = exe.parent()?;
-    let app = macos.parent()?.parent()?;
-    let in_bundle =
-        macos.ends_with("Contents/MacOS") && app.extension().is_some_and(|ext| ext == "app");
-    in_bundle.then(|| app.to_path_buf())
-}
-
-/// Whether `app` can be replaced where it is. Not when macOS runs it from an
-/// App Translocation copy (opened straight from Downloads or a DMG), nor
-/// when its folder can't be written (a mounted DMG, any read-only place).
-pub fn can_update_in_place(app: &Path) -> bool {
-    if app.to_string_lossy().contains("/AppTranslocation/") {
-        return false;
-    }
+/// Whether a file can be created beside `app`, as staging and swapping need.
+fn folder_writable(app: &Path) -> bool {
     let Some(folder) = app.parent() else {
         return false;
     };
@@ -547,6 +357,11 @@ pub fn can_update_in_place(app: &Path) -> bool {
     let writable = fs::File::create_new(&probe).is_ok();
     let _ = fs::remove_file(&probe);
     writable
+}
+
+/// Whether `app` can be replaced where it is.
+pub fn can_update_in_place(app: &Path) -> bool {
+    os::can_update_in_place(app)
 }
 
 /// The folder that holds each install's scratch folder.
@@ -576,7 +391,7 @@ fn update_from_cli() -> Result<()> {
         println!("Up to date: {VERSION} is the newest version.");
         return Ok(());
     };
-    ensure!(can_update_in_place(&app), MOVE_TO_APPLICATIONS);
+    ensure!(can_update_in_place(&app), os::MOVE_FIRST);
     let (dir, staged) = install_paths(&updates_dir(), &app, 0);
     let never = AtomicBool::new(false);
     prepare(
@@ -848,7 +663,7 @@ impl Updater {
                 .background_spawn(async move {
                     let swapped = swap(&app, &staged).and_then(|()| relaunch(&app, &files));
                     if swapped.is_err() {
-                        let _ = fs::remove_dir_all(&staged);
+                        remove(&staged);
                     }
                     swapped
                 })
@@ -957,7 +772,7 @@ impl Render for Updater {
                     } else {
                         let page =
                             open_notes(card_button("update-notes", "Release page").primary());
-                        (title, MOVE_TO_APPLICATIONS.into(), None, vec![page, later])
+                        (title, os::MOVE_FIRST.into(), None, vec![page, later])
                     }
                 }
                 State::Downloading { manifest, done } => {
@@ -1031,11 +846,11 @@ impl Render for Updater {
 
 /// Shows the card in a given state, or the menu's "up to date" answer, as
 /// the screenshots need them.
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 pub fn show_for_shots(case: &'static str, cx: &mut App) {
     let manifest = Manifest {
         version: "0.2.1".into(),
-        dmg: String::new(),
+        asset: String::new(),
         size: 33_400_000,
         sha256: String::new(),
         signature: String::new(),
@@ -1066,25 +881,28 @@ pub fn show_for_shots(case: &'static str, cx: &mut App) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::process::Command;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::time::Duration;
-
-    use gpui_kit::AppContext;
 
     // Named, not `super::*`: a glob would bring in gpui's `test` attribute.
+    use super::os::stand_in;
     use super::{
-        DMG_APP, Manifest, Source, State, Updater, VERSION, bundle_info, can_update_in_place,
-        check, check_bundle, clean_up, exchange, install_paths, is_newer, newer, platform, prepare,
-        relaunch, sha256, swap, verify,
+        Manifest, Source, VERSION, check, clean_up, install_paths, is_newer, newer, os, prepare,
+        sha256, swap, verify,
+    };
+
+    /// The manifest key the asset's URL is under on this platform.
+    const ASSET: &str = if cfg!(target_os = "macos") {
+        "dmg"
+    } else {
+        "appimage"
     };
 
     /// A fresh scratch folder for one test.
-    fn scratch(name: &str) -> PathBuf {
+    pub fn scratch(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("da-update-{}-{name}", std::process::id()));
         let _ = make_writable(&dir);
         let _ = fs::remove_dir_all(&dir);
@@ -1092,12 +910,12 @@ mod tests {
         dir
     }
 
-    fn make_writable(dir: &Path) -> std::io::Result<()> {
+    pub fn make_writable(dir: &Path) -> std::io::Result<()> {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(dir, fs::Permissions::from_mode(0o755))
     }
 
-    fn sh(command: &mut Command) {
+    pub fn sh(command: &mut Command) {
         let output = command.output().unwrap();
         assert!(output.status.success(), "{command:?}: {output:?}");
     }
@@ -1105,7 +923,7 @@ mod tests {
     /// A throwaway ed25519 key pair; returns (private key path, public key text).
     fn key_pair(dir: &Path, name: &str) -> (PathBuf, String) {
         let path = dir.join(name);
-        sh(Command::new("/usr/bin/ssh-keygen")
+        sh(Command::new("ssh-keygen")
             .args(["-q", "-t", "ed25519", "-N", "", "-C", "test", "-f"])
             .arg(&path));
         let public = fs::read_to_string(path.with_extension("pub")).unwrap();
@@ -1114,7 +932,7 @@ mod tests {
 
     /// Signs `file` the way the release workflow does and returns the signature text.
     fn sign(key: &Path, file: &Path) -> String {
-        sh(Command::new("/usr/bin/ssh-keygen")
+        sh(Command::new("ssh-keygen")
             .args(["-Y", "sign", "-n", "data-analyzer-update", "-f"])
             .arg(key)
             .arg(file));
@@ -1124,76 +942,19 @@ mod tests {
         text
     }
 
-    /// A stand-in `.app` with the given bundle id and version, signed ad hoc.
-    /// Its executable is a script that writes its arguments to `launched.txt`
-    /// beside the bundle, so a relaunch can be seen.
-    fn stand_in(app: &Path, id: &str, version: &str) {
-        let macos = app.join("Contents/MacOS");
-        fs::create_dir_all(&macos).unwrap();
-        fs::write(
-            app.join("Contents/Info.plist"),
-            format!(
-                r#"<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-<key>CFBundleIdentifier</key><string>{id}</string>
-<key>CFBundleShortVersionString</key><string>{version}</string>
-<key>CFBundleExecutable</key><string>run</string>
-<key>CFBundlePackageType</key><string>APPL</string>
-</dict></plist>
-"#
-            ),
-        )
-        .unwrap();
-        let out = app.parent().unwrap().join("launched.txt");
-        let script = macos.join("run");
-        fs::write(
-            &script,
-            format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n", out.display()),
-        )
-        .unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
-        sh(Command::new("/usr/bin/codesign")
-            .args(["--force", "--sign", "-"])
-            .arg(app));
-    }
-
-    /// Makes a read-only disk image of `content` and mounts it at `mount`.
-    /// One at a time: attaches from tests running in parallel fail.
-    fn mount_image(content: &Path, image: &Path, mount: &Path) {
-        static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _turn = ONE_AT_A_TIME.lock().unwrap();
-        sh(Command::new("/usr/bin/hdiutil")
-            .args(["create", "-quiet", "-format", "UDZO", "-srcfolder"])
-            .arg(content)
-            .arg(image));
-        fs::create_dir_all(mount).unwrap();
-        sh(Command::new("/usr/bin/hdiutil")
-            .args(["attach", "-quiet", "-nobrowse", "-readonly", "-mountpoint"])
-            .arg(mount)
-            .arg(image));
-    }
-
-    fn unmount(mount: &Path) {
-        sh(Command::new("/usr/bin/hdiutil")
-            .args(["detach", "-quiet", "-force"])
-            .arg(mount));
-    }
-
-    fn source(base: &str, key: &str) -> Source {
+    pub fn source(base: &str, key: &str) -> Source {
         Source {
             base: base.into(),
             key: key.into(),
         }
     }
 
-    const BASE: &str = "https://github.com/AritraBonTerra/data-analyzer/releases";
+    pub const BASE: &str = "https://github.com/AritraBonTerra/data-analyzer/releases";
 
-    fn manifest_json(version: &str) -> serde_json::Value {
+    pub fn manifest_json(version: &str) -> serde_json::Value {
         serde_json::to_value(Manifest {
             version: version.into(),
-            dmg: format!("{BASE}/download/v{version}/Data-Analyzer-{version}.dmg"),
+            asset: format!("{BASE}/download/v{version}/Data-Analyzer-{version}.dmg"),
             size: 34029918,
             sha256: "a".repeat(64),
             signature: "-----BEGIN SSH SIGNATURE-----\nAAAA\n-----END SSH SIGNATURE-----\n".into(),
@@ -1229,6 +990,12 @@ mod tests {
         let err = Manifest::parse(&missing.to_string(), &source).unwrap_err();
         assert!(format!("{err:#}").contains("sha256"), "{err:#}");
 
+        // Another platform's manifest has no asset for this one.
+        let mut other = manifest_json("0.2.1");
+        let url = other.as_object_mut().unwrap().remove(ASSET).unwrap();
+        other[if ASSET == "dmg" { "appimage" } else { "dmg" }] = url;
+        assert!(Manifest::parse(&other.to_string(), &source).is_err());
+
         // A key a later release adds is ignored.
         let mut extra = manifest_json("0.2.1");
         extra["arch"] = "arm64".into();
@@ -1238,14 +1005,14 @@ mod tests {
         );
 
         for (key, value) in [
-            ("dmg", "https://example.com/releases/download/v0.2.1/x.dmg"),
+            (ASSET, "https://example.com/releases/download/v0.2.1/x.dmg"),
             // A lookalike host that starts with the base's text.
             (
-                "dmg",
+                ASSET,
                 "https://github.com/AritraBonTerra/data-analyzer/releases.evil/download/x.dmg",
             ),
             (
-                "dmg",
+                ASSET,
                 "http://github.com/AritraBonTerra/data-analyzer/releases/download/x.dmg",
             ),
             ("notes", "file:///Applications/Calculator.app"),
@@ -1281,7 +1048,7 @@ mod tests {
         fs::write(&file, b"pretend this is a disk image").unwrap();
         let manifest = Manifest {
             version: "0.2.1".into(),
-            dmg: format!("{BASE}/download/v0.2.1/Data-Analyzer-0.2.1.dmg"),
+            asset: format!("{BASE}/download/v0.2.1/Data-Analyzer-0.2.1.dmg"),
             size: fs::metadata(&file).unwrap().len(),
             sha256: sha256(&file).unwrap(),
             signature: sign(key, &file),
@@ -1301,6 +1068,23 @@ mod tests {
         verify(&good, &manifest, &file).unwrap();
 
         let err = verify(&source(BASE, &other), &manifest, &file).unwrap_err();
+        assert!(err.to_string().contains("isn't signed"), "{err}");
+
+        // Signed by the right key, but for another purpose.
+        let wrong_namespace = {
+            sh(Command::new("ssh-keygen")
+                .args(["-Y", "sign", "-n", "file", "-f"])
+                .arg(&key)
+                .arg(&file));
+            let sig = PathBuf::from(format!("{}.sig", file.display()));
+            let text = fs::read_to_string(&sig).unwrap();
+            fs::remove_file(sig).unwrap();
+            Manifest {
+                signature: text,
+                ..manifest.clone()
+            }
+        };
+        let err = verify(&good, &wrong_namespace, &file).unwrap_err();
         assert!(err.to_string().contains("isn't signed"), "{err}");
 
         let wrong_sum = Manifest {
@@ -1329,89 +1113,42 @@ mod tests {
     }
 
     #[test]
-    fn checks_the_bundle() {
-        let dir = scratch("bundle");
-        let app = dir.join("Data Analyzer.app");
-        stand_in(&app, platform::BUNDLE_ID, "0.2.1");
-        check_bundle(&app, "0.2.1").unwrap();
-
-        // An older signed release replayed under a newer manifest.
-        let err = check_bundle(&app, "0.2.2").unwrap_err();
-        assert!(err.to_string().contains("holds version 0.2.1"), "{err}");
-
-        let other = dir.join("Other.app");
-        stand_in(&other, "com.example.Other", "0.2.1");
-        let err = check_bundle(&other, "0.2.1").unwrap_err();
-        assert!(err.to_string().contains("com.example.Other"), "{err}");
-
-        // A change after signing breaks the code signature.
-        fs::write(app.join("Contents/MacOS/run"), "#!/bin/sh\necho changed\n").unwrap();
-        let err = check_bundle(&app, "0.2.1").unwrap_err();
-        assert!(format!("{err:#}").contains("code signature"), "{err:#}");
-        fs::remove_dir_all(dir).unwrap();
-    }
-
-    /// A folder holding one file, `v`, with this text.
-    fn marked(dir: &Path, text: &str) {
-        fs::create_dir_all(dir).unwrap();
-        fs::write(dir.join("v"), text).unwrap();
-    }
-
-    fn mark(dir: &Path) -> String {
-        fs::read_to_string(dir.join("v")).unwrap()
-    }
-
-    #[test]
-    fn exchanges_in_one_step() {
-        let dir = scratch("exchange");
-        let (a, b) = (dir.join("a"), dir.join("b"));
-        marked(&a, "a");
-        marked(&b, "b");
-        exchange(&a, &b).unwrap();
-        assert_eq!((mark(&a), mark(&b)), ("b".into(), "a".into()));
-
-        // Across volumes the exchange fails, and neither folder moves.
-        let content = dir.join("content");
-        marked(&content.join("c"), "c");
-        let mount = dir.join("mount");
-        mount_image(&content, &dir.join("image.dmg"), &mount);
-        let failed = exchange(&mount.join("c"), &a);
-        let (on_image, here) = (mark(&mount.join("c")), mark(&a));
-        unmount(&mount);
-        assert!(failed.is_err());
-        assert_eq!((on_image, here), ("c".into(), "b".into()));
-
-        // Nothing staged: the installed folder stays.
-        assert!(exchange(&dir.join("missing"), &a).is_err());
-        assert_eq!(mark(&a), "b");
-        fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
     fn swaps_only_a_newer_copy() {
         let dir = scratch("swap");
-        let app = dir.join(DMG_APP);
-        let staged = dir.join(".Data Analyzer.app.update-1-1");
-        stand_in(&app, platform::BUNDLE_ID, "0.2.1");
-        stand_in(&staged, platform::BUNDLE_ID, "0.2.1");
+        let app = dir.join(stand_in::APP);
+        let staged = dir.join(format!(".{}.update-1-1", stand_in::APP));
+        stand_in::app(&app, "0.2.1");
+        stand_in::app(&staged, "0.2.1");
 
         // Another instance already put 0.2.1 in place: refuse, change nothing.
         let err = swap(&app, &staged).unwrap_err();
         assert_eq!(err.to_string(), "Data Analyzer is already 0.2.1.");
-        assert_eq!(bundle_info(&app).unwrap().1, "0.2.1");
-        assert!(staged.is_dir());
+        assert_eq!(os::installed_version(&app).unwrap(), "0.2.1");
+        assert!(staged.exists());
 
-        stand_in(&staged, platform::BUNDLE_ID, "0.3.0");
+        super::remove(&staged);
+        stand_in::app(&staged, "0.3.0");
         swap(&app, &staged).unwrap();
-        assert_eq!(bundle_info(&app).unwrap().1, "0.3.0");
-        // The old app waits at the staged path for the next launch's clean-up.
-        assert_eq!(bundle_info(&staged).unwrap().1, "0.2.1");
+        assert_eq!(os::installed_version(&app).unwrap(), "0.3.0");
+        // macOS: the old app waits at the staged path for the next launch's
+        // clean-up. Linux: the rename leaves nothing there.
+        if cfg!(target_os = "macos") {
+            assert_eq!(os::installed_version(&staged).unwrap(), "0.2.1");
+        } else {
+            assert!(!staged.exists());
+        }
         fs::remove_dir_all(dir).unwrap();
     }
 
+    /// A folder holding one file, `v`, with this text.
+    pub fn marked(dir: &Path, text: &str) {
+        fs::create_dir_all(dir).unwrap();
+        fs::write(dir.join("v"), text).unwrap();
+    }
+
     /// The pid of a process that has exited.
-    fn dead_pid() -> u32 {
-        let mut child = Command::new("/usr/bin/true").spawn().unwrap();
+    pub fn dead_pid() -> u32 {
+        let mut child = Command::new("true").spawn().unwrap();
         child.wait().unwrap();
         child.id()
     }
@@ -1421,113 +1158,61 @@ mod tests {
         let dir = scratch("clean-up");
         let (dead, live) = (dead_pid(), std::process::id());
         let updates = dir.join("updates");
-        let app = dir.join("Applications").join(DMG_APP);
-        marked(&app, "installed");
+        let app = dir.join("Applications").join(stand_in::APP);
+        stand_in::app(&app, "0.2.1");
         for pid in [dead, live] {
             marked(&updates.join(format!("{pid}-3")), "scratch");
-            marked(
-                &app.with_file_name(format!(".{DMG_APP}.update-{pid}-3")),
-                "staged",
+            stand_in::app(
+                &app.with_file_name(format!(".{}.update-{pid}-3", stand_in::APP)),
+                "0.3.0",
             );
         }
-        // The dead process left its disk image mounted.
-        let content = dir.join("content");
-        marked(&content, "image");
-        let mount = updates.join(format!("{dead}-3/mount"));
-        mount_image(&content, &dir.join("image.dmg"), &mount);
 
         clean_up(&updates, &app);
 
+        let staged = |pid| app.with_file_name(format!(".{}.update-{pid}-3", stand_in::APP));
         assert!(!updates.join(format!("{dead}-3")).exists());
-        assert!(
-            !app.with_file_name(format!(".{DMG_APP}.update-{dead}-3"))
-                .exists()
-        );
+        assert!(!staged(dead).exists());
         assert!(updates.join(format!("{live}-3")).exists());
-        assert!(
-            app.with_file_name(format!(".{DMG_APP}.update-{live}-3"))
-                .exists()
-        );
-        assert_eq!(mark(&app), "installed");
-        fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn knows_when_it_cannot_update_in_place() {
-        let dir = scratch("in-place");
-        let app = dir.join("Data Analyzer.app");
-        fs::create_dir_all(&app).unwrap();
-        assert!(can_update_in_place(&app));
-
-        let translocated = PathBuf::from(
-            "/private/var/folders/xy/T/AppTranslocation/1234-ABCD/d/Data Analyzer.app",
-        );
-        assert!(!can_update_in_place(&translocated));
-
-        // A folder the user can't write to.
-        let locked = dir.join("locked");
-        fs::create_dir_all(locked.join("Data Analyzer.app")).unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&locked, fs::Permissions::from_mode(0o555)).unwrap();
-        assert!(!can_update_in_place(&locked.join("Data Analyzer.app")));
-        make_writable(&locked).unwrap();
-
-        // A mounted DMG, as when the app runs from the volume it came on.
-        let content = dir.join("content");
-        fs::create_dir_all(content.join("Data Analyzer.app")).unwrap();
-        let mount = dir.join("mount");
-        mount_image(&content, &dir.join("image.dmg"), &mount);
-        let mounted = can_update_in_place(&mount.join("Data Analyzer.app"));
-        unmount(&mount);
-        assert!(!mounted);
+        assert!(staged(live).exists());
+        assert_eq!(os::installed_version(&app).unwrap(), "0.2.1");
         fs::remove_dir_all(dir).unwrap();
     }
 
     /// A release served the way GitHub lays it out, from a scratch folder.
-    struct Release {
-        dir: PathBuf,
-        source: Source,
-        manifest: Manifest,
+    pub struct Release {
+        pub dir: PathBuf,
+        pub source: Source,
+        pub manifest: Manifest,
     }
 
-    /// Builds a signed DMG holding a stand-in app at `version`, a manifest
-    /// for it, and serves both on 127.0.0.1.
-    fn release(dir: &Path, version: &str) -> Release {
+    /// Builds a signed release asset holding a stand-in app at `version`, a
+    /// manifest for it, and serves both on 127.0.0.1.
+    pub fn release(dir: &Path, version: &str) -> Release {
         let (key, public) = key_pair(dir, "key");
         let content = dir.join("content");
-        stand_in(&content.join(DMG_APP), platform::BUNDLE_ID, version);
+        let app = content.join(stand_in::APP);
+        stand_in::app(&app, version);
         let tag = format!("v{version}");
         let served = dir.join("served");
         let assets = served.join("releases/download").join(&tag);
         fs::create_dir_all(&assets).unwrap();
-        let name = format!("Data-Analyzer-{version}.dmg");
-        let dmg = assets.join(&name);
-        sh(Command::new("/usr/bin/hdiutil")
-            .args([
-                "create",
-                "-quiet",
-                "-format",
-                "UDZO",
-                "-volname",
-                "Data Analyzer",
-            ])
-            .arg("-srcfolder")
-            .arg(&content)
-            .arg(&dmg));
+        let name = format!("Data-Analyzer-{version}.{ASSET}");
+        let asset = stand_in::package(&app, &assets.join(&name));
         let port = serve(served.clone());
         let base = format!("http://127.0.0.1:{port}/releases");
         let manifest = Manifest {
             version: version.into(),
-            dmg: format!("{base}/download/{tag}/{name}"),
-            size: fs::metadata(&dmg).unwrap().len(),
-            sha256: sha256(&dmg).unwrap(),
-            signature: sign(&key, &dmg),
+            asset: format!("{base}/download/{tag}/{name}"),
+            size: fs::metadata(&asset).unwrap().len(),
+            sha256: sha256(&asset).unwrap(),
+            signature: sign(&key, &asset),
             notes: format!("{base}/tag/{tag}"),
         };
         let latest = served.join("releases/latest/download");
         fs::create_dir_all(&latest).unwrap();
         fs::write(
-            latest.join("latest.json"),
+            latest.join(os::MANIFEST),
             serde_json::to_string(&manifest).unwrap(),
         )
         .unwrap();
@@ -1550,6 +1235,11 @@ mod tests {
                 let mut request = String::new();
                 if reader.read_line(&mut request).is_err() {
                     continue;
+                }
+                // Read the headers too, so closing doesn't reset the connection.
+                let mut line = String::new();
+                while reader.read_line(&mut line).is_ok_and(|n| n > 2) {
+                    line.clear();
                 }
                 let path = request.split_whitespace().nth(1).unwrap_or("/");
                 let mut stream = &stream;
@@ -1577,8 +1267,8 @@ mod tests {
     fn prepares_from_a_server_and_stops_between_steps() {
         let dir = scratch("engine");
         let release = release(&dir, "9.0.0");
-        let app = dir.join("Applications").join(DMG_APP);
-        stand_in(&app, platform::BUNDLE_ID, VERSION);
+        let app = dir.join("Applications").join(stand_in::APP);
+        stand_in::app(&app, VERSION);
         let updates = dir.join("updates");
 
         let manifest = check(&release.source).unwrap().expect("no update offered");
@@ -1597,9 +1287,9 @@ mod tests {
             |_| {},
         )
         .unwrap();
-        assert_eq!(bundle_info(&staged).unwrap().1, "9.0.0");
+        assert_eq!(os::installed_version(&staged).unwrap(), "9.0.0");
         assert!(!scratch_dir.exists());
-        fs::remove_dir_all(&staged).unwrap();
+        super::remove(&staged);
 
         // Cancelled as each step starts: it stops after the step before,
         // and leaves neither scratch folder nor staged copy.
@@ -1625,7 +1315,7 @@ mod tests {
             assert!(!staged.exists(), "at {step}");
         }
 
-        // A version the DMG doesn't hold is caught at staging.
+        // A version the asset doesn't hold is caught at staging.
         let (scratch_dir, staged) = install_paths(&updates, &app, 3);
         let wrong = Manifest {
             version: "9.0.1".into(),
@@ -1653,9 +1343,13 @@ mod tests {
     fn install_and_relaunch_handlers() {
         let dir = scratch("handlers");
         let release = release(&dir, "9.0.0");
-        let app = dir.join("Applications").join(DMG_APP);
-        stand_in(&app, platform::BUNDLE_ID, VERSION);
+        let app = dir.join("Applications").join(stand_in::APP);
+        stand_in::app(&app, VERSION);
 
+        use super::{State, Updater};
+        use gpui_kit::AppContext;
+        use std::sync::Arc;
+        use std::time::Duration;
         let mut cx =
             gpui_kit::HeadlessAppContext::new(Arc::new(gpui_apple::AppleTextSystem::new()));
         let updater = cx.update(|cx| {
@@ -1717,8 +1411,8 @@ mod tests {
             std::thread::sleep(Duration::from_millis(100));
         }
         assert!(launched.exists(), "the new version didn't start");
-        assert_eq!(bundle_info(&app).unwrap().1, "9.0.0");
-        assert_eq!(bundle_info(&staged).unwrap().1, VERSION);
+        assert_eq!(os::installed_version(&app).unwrap(), "9.0.0");
+        assert_eq!(os::installed_version(&staged).unwrap(), VERSION);
 
         // Open files reach the new instance as arguments.
         fs::remove_file(&launched).unwrap();
@@ -1726,7 +1420,7 @@ mod tests {
             PathBuf::from("/tmp/sales 2024.csv"),
             PathBuf::from("/tmp/b.parquet"),
         ];
-        relaunch(&app, &files).unwrap();
+        super::relaunch(&app, &files).unwrap();
         let mut text = String::new();
         for _ in 0..50 {
             text = fs::read_to_string(&launched).unwrap_or_default();
@@ -1746,7 +1440,9 @@ mod tests {
     #[cfg(all(target_os = "macos", debug_assertions))]
     #[test]
     fn clicks_on_the_card() {
-        use gpui_kit::{Modifiers, TestAppContext, TestDispatcher, VisualTestContext};
+        use super::{State, Updater};
+        use gpui_kit::{AppContext, Modifiers, TestAppContext, TestDispatcher, VisualTestContext};
+        use std::sync::Arc;
 
         let dir = scratch("clicks");
         let cx = TestAppContext::build_with_text_system(
@@ -1821,6 +1517,7 @@ mod tests {
     /// Used by the click test only, so it shares that test's condition.
     #[cfg(all(target_os = "macos", debug_assertions))]
     fn settle(cx: &mut gpui_kit::VisualTestContext) {
+        use std::time::Duration;
         for _ in 0..10 {
             cx.run_until_parked();
             cx.executor().advance_clock(Duration::from_millis(100));

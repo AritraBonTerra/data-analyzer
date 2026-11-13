@@ -218,7 +218,7 @@ impl ImportPanel {
     }
 
     /// Whether a preview is still being computed. For the screenshot harness.
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "macos"))]
     pub fn is_loading(&self) -> bool {
         self.loading
     }

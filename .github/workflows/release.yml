@@ -1,6 +1,8 @@
-# Builds, signs, notarizes and publishes a release when a tag v<version> is pushed.
-# A tag v<version>-dryrun.<n> runs every step except publishing, and keeps the
-# DMG and latest.json as workflow artifacts instead.
+# Builds and publishes a release when a tag v<version> is pushed: a signed and
+# notarized DMG for macOS (Apple Silicon) and an AppImage for Linux (x86_64 and
+# aarch64), each with the manifest its platform's updater reads. A tag
+# v<version>-dryrun.<n> runs every step except publishing, and keeps the files
+# as workflow artifacts instead.
 name: Release
 
 on:
@@ -119,8 +121,64 @@ jobs:
             dist/latest.json
           if-no-files-found: error
 
+  # One AppImage per architecture, each on a runner of that architecture, on the
+  # oldest Ubuntu GitHub offers: an AppImage runs where glibc is at least the
+  # build's (2.35 here).
+  linux:
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            arch: x86_64
+          - runner: ubuntu-22.04-arm
+            arch: aarch64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check tag against the app version
+        id: tag
+        run: scripts/release-tag.sh "$GITHUB_REF_NAME" >>"$GITHUB_OUTPUT"
+
+      - name: Install the windowing libraries GPUI links
+        run: scripts/linux-deps.sh
+
+      - name: Install Rust from rust-toolchain.toml
+        run: rustup toolchain install
+
+      - run: cargo clippy --workspace --all-targets --release -- -D warnings
+      - run: cargo test --workspace --release
+        timeout-minutes: 30
+
+      - name: Build the AppImage
+        run: scripts/appimage.sh
+
+      - name: Sign the AppImage and write its manifest
+        env:
+          UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+          VERSION: ${{ steps.tag.outputs.version }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          key=$(mktemp) # created with mode 600
+          trap 'rm -f "$key"' EXIT
+          printf '%s\n' "$UPDATE_SIGNING_KEY" >"$key"
+          scripts/release-manifest.sh "dist/Data-Analyzer-$ARCH.AppImage" "$VERSION" "$key" \
+            packaging/update-key.pub >"dist/latest-linux-$ARCH.json"
+          cat "dist/latest-linux-$ARCH.json"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-linux-${{ matrix.arch }}
+          path: |
+            dist/Data-Analyzer-${{ matrix.arch }}.AppImage
+            dist/latest-linux-${{ matrix.arch }}.json
+          if-no-files-found: error
+
   publish:
-    needs: build
+    needs: [build, linux]
     if: needs.build.outputs.dry_run == 'false'
     runs-on: ubuntu-latest
     permissions:
@@ -128,7 +186,8 @@ jobs:
     steps:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: release
+          pattern: release*
+          merge-multiple: true
 
       - name: Publish the release
         env:
@@ -136,4 +195,6 @@ jobs:
           VERSION: ${{ needs.build.outputs.version }}
         run: |
           gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag \
-            --generate-notes "Data-Analyzer-$VERSION.dmg" latest.json
+            --generate-notes "Data-Analyzer-$VERSION.dmg" latest.json \
+            Data-Analyzer-x86_64.AppImage latest-linux-x86_64.json \
+            Data-Analyzer-aarch64.AppImage latest-linux-aarch64.json

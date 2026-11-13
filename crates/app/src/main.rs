@@ -1,9 +1,23 @@
-//! Data Analyzer: a native macOS viewer for CSV, TSV, Excel, Parquet and JSON.
+//! Data Analyzer: a native viewer for CSV, TSV, Excel, Parquet and JSON, for
+//! macOS and Linux.
 //!
-//! This file wires the app together: actions and shortcuts, the native menu
-//! bar, routing of files to windows (CLI args, ⌘O, Finder, drag and drop),
-//! the app-wide state (recent files, open windows) and the two command-line
-//! flags, `--version` and `--update`.
+//! This file wires the app together: actions and shortcuts, the menus (the
+//! system menu bar on macOS, one in each window's title bar on Linux),
+//! routing of files to windows (CLI args, Open…, Finder or a second launch,
+//! drag and drop), the app-wide state (recent files, open windows) and the
+//! two command-line flags, `--version` and `--update`.
+
+/// A key binding on the platform's main modifier: `cmd_or_ctrl!("o")` is
+/// `"cmd-o"` on macOS and `"ctrl-o"` on Linux.
+macro_rules! cmd_or_ctrl {
+    ($keys:literal) => {
+        if cfg!(target_os = "macos") {
+            concat!("cmd-", $keys)
+        } else {
+            concat!("ctrl-", $keys)
+        }
+    };
+}
 
 mod chart;
 mod details;
@@ -28,6 +42,7 @@ use std::path::PathBuf;
 
 use futures::StreamExt;
 use futures::channel::mpsc::unbounded;
+use gpui_kit::component::menu::AppMenuBar;
 use gpui_kit::component::{Theme, TitleBar};
 use gpui_kit::*;
 use serde::Deserialize;
@@ -76,21 +91,45 @@ fn main() {
         _ => {}
     }
 
+    let args: Vec<PathBuf> = std::env::args_os().skip(1).map(PathBuf::from).collect();
+
+    // On Linux the installed app runs once per user, as macOS does it: a
+    // second launch hands its files to the first and ends here.
+    #[cfg(target_os = "linux")]
+    let instance = match update::running_app().map(|_| platform::claim_instance(&args)) {
+        Some(platform::Launch::Forwarded) => return,
+        Some(platform::Launch::First(listener)) => listener,
+        None => None,
+    };
+
     let app = gpui_kit::application().with_assets(gpui_kit::assets::AllAssets);
 
-    // Finder and `open` deliver files through the app delegate, sometimes
-    // before `run` has started; queue them and drain inside the app loop.
-    let (urls_tx, mut urls_rx) = unbounded::<Vec<String>>();
+    // Files arriving while the app runs: from Finder and `open` through the
+    // app delegate on macOS (sometimes before `run` has started), from later
+    // launches on Linux. Queued here and drained inside the app loop; an
+    // empty batch is a launch with no files and asks for a window.
+    let (files_tx, mut files_rx) = unbounded::<Vec<PathBuf>>();
+    let delegate_tx = files_tx.clone();
+    #[cfg(target_os = "linux")]
+    if let Some(listener) = instance {
+        platform::listen_for_launches(listener, move |paths| {
+            let _ = files_tx.unbounded_send(paths);
+        });
+    }
     app.on_open_urls(move |urls| {
-        let _ = urls_tx.unbounded_send(urls);
+        let paths: Vec<PathBuf> = urls
+            .iter()
+            .filter_map(|u| platform::url_to_path(u))
+            .collect();
+        if !paths.is_empty() {
+            let _ = delegate_tx.unbounded_send(paths);
+        }
     });
     app.on_reopen(|cx| {
         if cx.windows().is_empty() {
             new_window(None, cx);
         }
     });
-
-    let args: Vec<PathBuf> = std::env::args_os().skip(1).map(PathBuf::from).collect();
 
     app.run(move |cx| {
         gpui_kit::init(cx);
@@ -102,9 +141,11 @@ fn main() {
         Theme::sync_system_appearance(None, cx);
         Theme::sync_scrollbar_appearance(cx);
         cx.set_global(Windows::default());
-        cx.set_global(RecentStore::load(
-            platform::app_support_dir().join("recent.json"),
-        ));
+        cx.set_global(MenuBars::default());
+        cx.set_global(RecentStore::load(platform::data_dir().join("recent.json")));
+        #[cfg(target_os = "linux")]
+        cx.background_spawn(async { platform::refresh_desktop_entry() })
+            .detach();
         cx.background_spawn(async { da_core::clean_cache(&platform::cache_dir()) })
             .detach();
         // Open datasets aren't dropped on quit, so delete their scratch files here.
@@ -115,11 +156,11 @@ fn main() {
         .detach();
 
         cx.bind_keys([
-            KeyBinding::new("cmd-o", Open, None),
-            KeyBinding::new("cmd-n", NewWindow, None),
-            KeyBinding::new("cmd-w", CloseWindow, None),
-            KeyBinding::new("cmd-q", Quit, None),
-            KeyBinding::new("cmd-m", Minimize, None),
+            KeyBinding::new(cmd_or_ctrl!("o"), Open, None),
+            KeyBinding::new(cmd_or_ctrl!("n"), NewWindow, None),
+            KeyBinding::new(cmd_or_ctrl!("w"), CloseWindow, None),
+            KeyBinding::new(cmd_or_ctrl!("q"), Quit, None),
+            KeyBinding::new(cmd_or_ctrl!("m"), Minimize, None),
         ]);
         cx.on_action(|_: &Quit, cx| cx.quit());
         cx.on_action(|_: &Open, cx| open_dialog(cx));
@@ -150,9 +191,9 @@ fn main() {
             if let Some(window) = cx.active_window() {
                 let _ = window.update(cx, |_, window, cx| {
                     let note = match result {
-                        Ok(()) => gpui_kit::component::notification::Notification::success(
-                            "Requested. macOS will ask you to confirm each file type.",
-                        ),
+                        Ok(done) => {
+                            gpui_kit::component::notification::Notification::success(done)
+                        }
                         Err(err) => {
                             gpui_kit::component::notification::Notification::info(err.to_string())
                         }
@@ -161,7 +202,7 @@ fn main() {
                 });
             }
         });
-        // Fallback when no window content handled ⌘W (e.g. nothing focused).
+        // Fallback when no window content handled Close Window (e.g. nothing focused).
         cx.on_action(|_: &CloseWindow, cx| {
             for handle in cx.windows() {
                 let _ = handle.update(cx, |_, window, _| {
@@ -176,18 +217,28 @@ fn main() {
             cx.global_mut::<Windows>()
                 .0
                 .retain(|(handle, _)| handle.window_id() != id);
+            cx.global_mut::<MenuBars>().0.remove(&id);
+            if cx.try_global::<MenuWindow>().and_then(|w| w.0) == Some(id) {
+                cx.set_global(MenuWindow(None));
+            }
+            // A macOS app stays in the Dock with no windows; on Linux nothing
+            // would be left to show it is running.
+            if cfg!(not(target_os = "macos")) && cx.global::<Windows>().0.is_empty() {
+                cx.quit();
+            }
         })
         .detach();
         cx.observe_global::<Theme>(refresh_menus).detach();
         rebuild_menus(cx);
 
         cx.spawn(async move |cx| {
-            while let Some(urls) = urls_rx.next().await {
+            while let Some(paths) = files_rx.next().await {
                 cx.update(|cx| {
-                    for url in urls {
-                        if let Some(path) = platform::url_to_path(&url) {
-                            open_path(path, cx);
-                        }
+                    if paths.is_empty() {
+                        new_window(None, cx);
+                    }
+                    for path in paths {
+                        open_path(path, cx);
                     }
                 });
             }
@@ -259,6 +310,10 @@ fn new_window(path: Option<PathBuf>, cx: &mut App) {
             appears_transparent: true,
             traffic_light_position: Some(point(px(12.), px(17.))),
         }),
+        // Linux only: the app draws its own title bar, and the desktop matches
+        // windows to the installed `.desktop` file (and its icon) by app id.
+        window_decorations: Some(WindowDecorations::Client),
+        app_id: Some(platform::BUNDLE_ID.into()),
         ..TitleBar::window_options()
     };
     let opened = gpui_kit::open_window(options, cx, |window, cx| {
@@ -303,14 +358,28 @@ pub fn refresh_menus(cx: &mut App) {
     cx.defer(rebuild_menus);
 }
 
+/// The window that last became active. The menus describe it: Linux can
+/// report no active window while focus moves from one window to another.
+#[derive(Default)]
+struct MenuWindow(Option<WindowId>);
+
+impl Global for MenuWindow {}
+
+/// Points the menus at `window`, which just became active.
+pub fn window_activated(window: WindowId, cx: &mut App) {
+    cx.set_global(MenuWindow(Some(window)));
+    refresh_menus(cx);
+}
+
 fn rebuild_menus(cx: &mut App) {
-    let (stats, chart, sql, adjust) = cx
-        .active_window()
-        .and_then(|handle| {
+    let active = (cx.try_global::<MenuWindow>().and_then(|w| w.0))
+        .or_else(|| cx.active_window().map(|handle| handle.window_id()));
+    let (stats, chart, sql, adjust) = active
+        .and_then(|id| {
             let windows = &cx.global::<Windows>().0;
             windows
                 .iter()
-                .find(|(h, _)| h.window_id() == handle.window_id())
+                .find(|(h, _)| h.window_id() == id)
                 .map(|(_, w)| w.clone())
         })
         .and_then(|workspace| workspace.read(cx).document().cloned())
@@ -351,52 +420,114 @@ fn rebuild_menus(cx: &mut App) {
             .push(MenuItem::action("Clear Menu", ClearRecent));
     }
 
-    cx.set_menus(vec![
-        Menu::new("Data Analyzer").items([
-            MenuItem::action("About Data Analyzer", About),
-            MenuItem::action("Check for Updates…", CheckForUpdates),
-            MenuItem::separator(),
-            MenuItem::action("Make Default for Data Files…", MakeDefault),
-            MenuItem::separator(),
-            MenuItem::SystemMenu(OsMenu {
-                name: "Services".into(),
-                menu_type: SystemMenuType::Services,
-            }),
-            MenuItem::separator(),
-            MenuItem::action("Quit Data Analyzer", Quit),
-        ]),
-        Menu::new("File").items([
-            MenuItem::action("Open…", Open),
-            MenuItem::submenu(recent_menu),
-            MenuItem::action("New Window", NewWindow),
-            MenuItem::separator(),
-            MenuItem::action("Close Window", CloseWindow),
-            MenuItem::separator(),
-            MenuItem::action("Adjust Import…", AdjustImport).disabled(!adjust),
-            MenuItem::separator(),
-            MenuItem::action("Export…", Export),
-            MenuItem::submenu(Menu::new("Export As").items([
-                MenuItem::action("CSV…", ExportAs(ExportKind::Csv)),
-                MenuItem::action("Parquet…", ExportAs(ExportKind::Parquet)),
-                MenuItem::action("JSON Lines…", ExportAs(ExportKind::Json)),
-            ])),
-        ]),
-        Menu::new("Edit").items([
-            MenuItem::os_action("Copy", document::Copy, OsAction::Copy),
-            MenuItem::separator(),
-            MenuItem::action("Find", Find),
-            MenuItem::action("Clear Filters and Search", ClearFilters),
-        ]),
-        Menu::new("View").items([
-            MenuItem::action("Stats Panel", ToggleStats).checked(stats),
-            MenuItem::action("Chart Panel", ToggleChart).checked(chart),
-            MenuItem::action("SQL Panel", ToggleSql).checked(sql),
-            MenuItem::separator(),
-            MenuItem::action("Show File Data", ShowFileData),
-        ]),
-        Menu::new("Window").items([
-            MenuItem::action("Minimize", Minimize),
-            MenuItem::action("Zoom", Zoom),
-        ]),
+    let mut file = Menu::new("File").items([
+        MenuItem::action("Open…", Open),
+        MenuItem::submenu(recent_menu),
+        MenuItem::action("New Window", NewWindow),
+        MenuItem::separator(),
+        MenuItem::action("Close Window", CloseWindow),
+        MenuItem::separator(),
+        MenuItem::action("Adjust Import…", AdjustImport).disabled(!adjust),
+        MenuItem::separator(),
+        MenuItem::action("Export…", Export),
+        MenuItem::submenu(Menu::new("Export As").items([
+            MenuItem::action("CSV…", ExportAs(ExportKind::Csv)),
+            MenuItem::action("Parquet…", ExportAs(ExportKind::Parquet)),
+            MenuItem::action("JSON Lines…", ExportAs(ExportKind::Json)),
+        ])),
     ]);
+    let edit = Menu::new("Edit").items([
+        MenuItem::os_action("Copy", document::Copy, OsAction::Copy),
+        MenuItem::separator(),
+        MenuItem::action("Find", Find),
+        MenuItem::action("Clear Filters and Search", ClearFilters),
+    ]);
+    let view = Menu::new("View").items([
+        MenuItem::action("Stats Panel", ToggleStats).checked(stats),
+        MenuItem::action("Chart Panel", ToggleChart).checked(chart),
+        MenuItem::action("SQL Panel", ToggleSql).checked(sql),
+        MenuItem::separator(),
+        MenuItem::action("Show File Data", ShowFileData),
+    ]);
+
+    // macOS puts the app's own items in a menu named after it; Linux apps
+    // keep Quit in File and the rest in Help.
+    let menus = if cfg!(target_os = "macos") {
+        vec![
+            Menu::new("Data Analyzer").items([
+                MenuItem::action("About Data Analyzer", About),
+                MenuItem::action("Check for Updates…", CheckForUpdates),
+                MenuItem::separator(),
+                MenuItem::action("Make Default for Data Files…", MakeDefault),
+                MenuItem::separator(),
+                MenuItem::SystemMenu(OsMenu {
+                    name: "Services".into(),
+                    menu_type: SystemMenuType::Services,
+                }),
+                MenuItem::separator(),
+                MenuItem::action("Quit Data Analyzer", Quit),
+            ]),
+            file,
+            edit,
+            view,
+            Menu::new("Window").items([
+                MenuItem::action("Minimize", Minimize),
+                MenuItem::action("Zoom", Zoom),
+            ]),
+        ]
+    } else {
+        file.items
+            .extend([MenuItem::separator(), MenuItem::action("Quit", Quit)]);
+        vec![
+            file,
+            edit,
+            view,
+            Menu::new("Help").items([
+                MenuItem::action("Check for Updates…", CheckForUpdates),
+                MenuItem::action("Make Default for Data Files…", MakeDefault),
+                MenuItem::separator(),
+                MenuItem::action("About Data Analyzer", About),
+            ]),
+        ]
+    };
+    cx.set_menus(menus);
+    reload_menu_bars(cx);
+}
+
+/// Each window's menu bar, for platforms without a system one (Linux). The
+/// title bars ask [`menu_bar`] for theirs; [`rebuild_menus`] reloads them all.
+#[derive(Default)]
+struct MenuBars(std::collections::HashMap<WindowId, Entity<AppMenuBar>>);
+
+impl Global for MenuBars {}
+
+/// The menu bar for `window`'s title bar, or `None` on macOS, where the
+/// menus are in the system menu bar.
+pub fn menu_bar(window: &Window, cx: &mut App) -> Option<impl IntoElement + use<>> {
+    if cfg!(target_os = "macos") {
+        return None;
+    }
+    let id = window.window_handle().window_id();
+    let bar = match cx.global::<MenuBars>().0.get(&id) {
+        Some(bar) => bar.clone(),
+        None => {
+            let bar = AppMenuBar::new(cx);
+            cx.global_mut::<MenuBars>().0.insert(id, bar.clone());
+            bar
+        }
+    };
+    Some(div().flex_none().h_full().py(px(6.)).child(bar))
+}
+
+/// Hands the menus just set to the window menu bars (Linux).
+fn reload_menu_bars(cx: &mut App) {
+    if cfg!(target_os = "macos") {
+        return;
+    }
+    let menus = cx.get_menus().unwrap_or_default();
+    gpui_kit::base::GlobalState::global_mut(cx).set_app_menus(menus);
+    let bars: Vec<_> = cx.global::<MenuBars>().0.values().cloned().collect();
+    for bar in bars {
+        bar.update(cx, |bar, cx| bar.reload(cx));
+    }
 }

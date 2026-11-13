@@ -29,10 +29,17 @@ impl Workspace {
             Theme::sync_system_appearance(Some(window), cx);
             cx.notify();
         });
+        // The menus show the active window's document (its panels, whether
+        // its import can be adjusted), so they follow the active window.
+        let activation = cx.observe_window_activation(window, |_, window, cx| {
+            if window.is_window_active() {
+                crate::window_activated(window.window_handle().window_id(), cx);
+            }
+        });
         let mut this = Self {
             focus_handle: cx.focus_handle(),
             content: Content::Welcome(cx.new(Welcome::new)),
-            _subscriptions: vec![appearance],
+            _subscriptions: vec![appearance, activation],
         };
         match path {
             Some(path) => this.open(path, window, cx),
@@ -62,13 +69,13 @@ impl Workspace {
 
     fn show_welcome(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let welcome = cx.new(Welcome::new);
-        self._subscriptions.truncate(1);
+        self._subscriptions.truncate(2);
         self._subscriptions
             .push(cx.subscribe_in(&welcome, window, Self::on_welcome_event));
         self.content = Content::Welcome(welcome);
         window.set_window_title("Data Analyzer");
-        // Give the window a focused element so window-level shortcuts (⌘W,
-        // ⌘O…) dispatch through this view's action handlers.
+        // Give the window a focused element so window-level shortcuts (Close
+        // Window, Open…) dispatch through this view's action handlers.
         let focus = self.focus_handle.clone();
         window.defer(cx, move |window, cx| focus.focus(window, cx));
         cx.notify();
@@ -77,7 +84,7 @@ impl Workspace {
     /// Replaces whatever this window shows with `path`.
     pub fn open(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         let document = cx.new(|cx| Document::new(path, window, cx));
-        self._subscriptions.truncate(1);
+        self._subscriptions.truncate(2);
         let focus = document.focus_handle(cx);
         window.defer(cx, move |window, cx| focus.focus(window, cx));
         self.content = Content::Document(document);
@@ -126,23 +133,26 @@ impl Focusable for Workspace {
 }
 
 impl Render for Workspace {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let content: AnyElement = match &self.content {
             Content::Welcome(welcome) => div()
                 .size_full()
                 .flex()
                 .flex_col()
                 .child(
-                    TitleBar::new().h(px(TOOLBAR_HEIGHT)).child(
-                        h_flex()
-                            .w_full()
-                            .h_full()
-                            .justify_center()
-                            .text_sm()
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(cx.theme().muted_foreground)
-                            .child("Data Analyzer"),
-                    ),
+                    TitleBar::new()
+                        .h(px(TOOLBAR_HEIGHT))
+                        .children(crate::menu_bar(window, cx))
+                        .child(
+                            h_flex()
+                                .w_full()
+                                .h_full()
+                                .justify_center()
+                                .text_sm()
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(cx.theme().muted_foreground)
+                                .child("Data Analyzer"),
+                        ),
                 )
                 .child(div().flex_1().min_h_0().child(welcome.clone()))
                 .into_any_element(),

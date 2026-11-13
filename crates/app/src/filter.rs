@@ -368,7 +368,7 @@ impl FilterEditor {
 
     /// Types `text` as the filter's value with the operator labelled `op`
     /// and applies it, as a user would. For the screenshot harness.
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "macos"))]
     pub fn type_filter(
         &mut self,
         op: &str,
@@ -386,7 +386,7 @@ impl FilterEditor {
     }
 
     /// Whether a fit is still being counted. For the screenshot harness.
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "macos"))]
     pub fn is_counting(&self) -> bool {
         matches!(self.picked, Some((_, Counted::Counting)))
     }

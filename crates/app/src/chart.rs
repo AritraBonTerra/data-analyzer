@@ -171,7 +171,7 @@ impl ChartPanel {
     }
 
     /// Whether a chart is still being computed. For the screenshot harness.
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "macos"))]
     pub fn is_loading(&self) -> bool {
         self.loading
     }
@@ -358,7 +358,7 @@ impl ChartPanel {
     }
 
     /// Hovers the first mark, as the pointer would. For the screenshot harness.
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "macos"))]
     pub fn hover_first(&mut self, cx: &mut Context<Self>) {
         let hit = self.hits.borrow().first().copied();
         self.hovered = hit.map(|h| Hover {

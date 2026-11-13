@@ -1197,7 +1197,9 @@ fn remove_sessions(cache_dir: &Path, should_remove: impl Fn(i32) -> bool) {
 
 fn process_alive(pid: i32) -> bool {
     // Signal 0 checks existence without sending anything. EPERM means it exists.
-    unsafe { libc::kill(pid, 0) == 0 || *libc::__error() == libc::EPERM }
+    // SAFETY: signal 0 sends nothing.
+    let alive = unsafe { libc::kill(pid, 0) } == 0;
+    alive || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
 /// Whether `handle` still belongs to the latest call. Newer calls replace it,

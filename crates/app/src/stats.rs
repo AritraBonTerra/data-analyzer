@@ -62,7 +62,7 @@ impl StatsPanel {
     }
 
     /// Whether a distribution is still being computed. For the screenshot harness.
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "macos"))]
     pub fn is_loading(&self) -> bool {
         self.loading
     }

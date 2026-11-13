@@ -5,7 +5,7 @@
 use std::sync::Arc;
 
 use da_core::ColumnKind;
-use gpui_kit::component::ActiveTheme;
+use gpui_kit::component::{ActiveTheme, kbd::Kbd};
 use gpui_kit::*;
 
 /// Row height in the grid. Tight enough to show plenty of rows, roomy enough to read.
@@ -101,10 +101,18 @@ pub fn kind_icon(kind: ColumnKind) -> &'static str {
     }
 }
 
-/// A keyboard-shortcut style hint, e.g. `⌘F`.
-pub fn shortcut_hint(text: &'static str, cx: &App) -> Div {
+/// A key binding as the platform writes it: `"cmd-shift-c"` is `⇧⌘C` on
+/// macOS, `"ctrl-shift-c"` is `Ctrl+Shift+C` on Linux.
+pub fn keys(binding: &'static str) -> String {
+    Keystroke::parse(binding)
+        .map(|keystroke| Kbd::format(&keystroke))
+        .unwrap_or_else(|_| binding.into())
+}
+
+/// A keyboard-shortcut style hint for a binding, e.g. `⌘F`.
+pub fn shortcut_hint(binding: &'static str, cx: &App) -> Div {
     div()
         .text_xs()
         .text_color(cx.theme().muted_foreground.opacity(0.7))
-        .child(text)
+        .child(keys(binding))
 }
