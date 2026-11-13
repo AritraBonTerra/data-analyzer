@@ -755,6 +755,9 @@ impl Render for SettingsView {
         };
         div()
             .track_focus(&self.focus_handle)
+            // Minimize is bound app-wide but handled per window; Close Window
+            // falls back to the app's handler.
+            .on_action(|_: &crate::Minimize, window, _| window.minimize_window())
             .size_full()
             .flex()
             .flex_col()
@@ -893,9 +896,23 @@ mod tests {
         // Recording is over: ⌘Q now goes to the keymap, where Quit no longer has it.
         cx.simulate_keystrokes("cmd-q");
         assert_eq!(quits.get(), 0);
-        cx.update(|_, cx| keymap::reset_all(cx));
+        // Putting Quit back takes ⌘Q from Find rather than sharing it.
+        cx.update(|_, cx| keymap::reset("quit", cx));
+        let find = cx.update(|_, cx| keymap::shortcuts(command("find").unwrap(), cx));
+        assert!(find.is_empty(), "Find kept ⌘Q: {find:?}");
         cx.simulate_keystrokes("cmd-q");
-        assert_eq!(quits.get(), 1, "⌘Q didn't quit after Reset All");
+        assert_eq!(quits.get(), 1, "⌘Q didn't quit after resetting Quit");
+
+        // The SQL editor's own ⌘Enter runs a query only while that's Run Query's shortcut.
+        let has = |cx: &mut VisualTestContext| {
+            cx.update(|_, cx| keymap::has_shortcut("run_query", "secondary-enter", cx))
+        };
+        assert!(has(&mut cx));
+        cx.update(|_, cx| keymap::assign("run_query", None, cx));
+        assert!(!has(&mut cx));
+
+        cx.update(|_, cx| keymap::reset_all(cx));
+        assert!(has(&mut cx));
         assert!(app_cx.update(|cx| cx.global::<SettingsStore>().settings.shortcuts.is_empty()));
         let _ = std::fs::remove_dir_all(dir);
         // Dropping the app here deadlocks in gpui-base's text-layout cleanup

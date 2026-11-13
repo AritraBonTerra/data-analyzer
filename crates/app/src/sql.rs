@@ -48,9 +48,13 @@ impl SqlPanel {
                 .placeholder("SELECT * FROM data LIMIT 100")
         });
         let subscriptions = vec![cx.subscribe(&editor, |this, _, event: &InputEvent, cx| {
+            // The editor's own ⌘Enter binding sits deeper than Run Query's and
+            // takes the key first, so it runs the query only while ⌘Enter is
+            // still Run Query's shortcut. Other shortcuts reach `run` directly.
             if let InputEvent::PressEnter {
                 secondary: true, ..
             } = event
+                && crate::keymap::has_shortcut("run_query", "secondary-enter", cx)
             {
                 this.run(&RunQuery, cx);
             }

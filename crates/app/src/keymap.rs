@@ -268,31 +268,54 @@ fn same_keys(a: &Keystroke, b: &Keystroke) -> bool {
     a.modifiers == b.modifiers && a.key == b.key
 }
 
+/// Whether command `id`'s shortcuts include `keys` (e.g. `"secondary-enter"`).
+pub fn has_shortcut(id: &str, keys: &str, cx: &App) -> bool {
+    let (Some(command), Some(wanted)) = (command(id), parse(keys, cx)) else {
+        return false;
+    };
+    shortcuts(command, cx)
+        .iter()
+        .any(|keys| parse(keys, cx).is_some_and(|keys| same_keys(&keys, &wanted)))
+}
+
+/// The other commands that have any of `keystrokes`, each with the
+/// shortcuts it keeps once those are taken away.
+fn take_from_others(
+    id: &str,
+    keystrokes: &[Keystroke],
+    cx: &App,
+) -> Vec<(&'static Command, Vec<String>)> {
+    let mut changes = Vec::new();
+    for other in COMMANDS.iter().filter(|other| other.id != id) {
+        let current = shortcuts(other, cx);
+        let kept: Vec<String> = current
+            .iter()
+            .filter(|keys| {
+                !parse(keys, cx).is_some_and(|keys| keystrokes.iter().any(|k| same_keys(&keys, k)))
+            })
+            .cloned()
+            .collect();
+        if kept.len() != current.len() {
+            changes.push((other, kept));
+        }
+    }
+    changes
+}
+
 /// Gives command `id` the single shortcut `keystroke`, or none when `None`.
 /// Another command that had the same shortcut loses it; its name is
 /// returned so the caller can say so.
 pub fn assign(id: &str, keystroke: Option<&Keystroke>, cx: &mut App) -> Option<&'static str> {
-    let os = cx.platform_info().os;
-    let keys = keystroke.map(|keystroke| keystroke.unparse(os));
-    let mut taken_from = None;
-    let mut changes = Vec::new();
-    if let Some(keystroke) = keystroke {
-        for other in COMMANDS.iter().filter(|other| other.id != id) {
-            let current = shortcuts(other, cx);
-            let kept: Vec<String> = current
-                .iter()
-                .filter(|keys| !parse(keys, cx).is_some_and(|other| same_keys(&other, keystroke)))
-                .cloned()
-                .collect();
-            if kept.len() != current.len() {
-                taken_from = Some(other.name);
-                changes.push((other.id, kept));
-            }
-        }
-    }
+    let keys = keystroke.map(|keystroke| keystroke.unparse(cx.platform_info().os));
+    let changes = take_from_others(
+        id,
+        keystroke.map(std::slice::from_ref).unwrap_or_default(),
+        cx,
+    );
+    let taken_from = changes.last().map(|(other, _)| other.name);
     SettingsStore::edit(cx, |settings| {
         for (other, kept) in changes {
-            settings.shortcuts.insert(other.into(), kept);
+            settings.shortcuts.insert(other.id.into(), kept);
         }
         settings
             .shortcuts
@@ -301,9 +324,23 @@ pub fn assign(id: &str, keystroke: Option<&Keystroke>, cx: &mut App) -> Option<&
     taken_from
 }
 
-/// Puts command `id` back to its default shortcuts.
+/// Puts command `id` back to its default shortcuts, taking them from any
+/// other command that was given one since.
 pub fn reset(id: &str, cx: &mut App) {
+    let defaults: Vec<Keystroke> = command(id)
+        .map(|command| {
+            command
+                .defaults
+                .iter()
+                .filter_map(|keys| parse(keys, cx))
+                .collect()
+        })
+        .unwrap_or_default();
+    let changes = take_from_others(id, &defaults, cx);
     SettingsStore::edit(cx, |settings| {
+        for (other, kept) in changes {
+            settings.shortcuts.insert(other.id.into(), kept);
+        }
         settings.shortcuts.remove(id);
     });
 }
