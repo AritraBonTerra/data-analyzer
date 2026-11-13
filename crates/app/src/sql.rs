@@ -14,8 +14,8 @@ const CONTEXT: &str = "SqlPanel";
 
 pub fn init(cx: &mut App) {
     cx.bind_keys([
-        KeyBinding::new("cmd-enter", RunQuery, Some(CONTEXT)),
-        KeyBinding::new("cmd-.", CancelQuery, Some(CONTEXT)),
+        KeyBinding::new(cmd_or_ctrl!("enter"), RunQuery, Some(CONTEXT)),
+        KeyBinding::new(cmd_or_ctrl!("."), CancelQuery, Some(CONTEXT)),
     ]);
 }
 
@@ -260,7 +260,7 @@ impl Render for SqlPanel {
                             .child(
                                 self.button("run-query", "Run", true, cx)
                                     .child(
-                                        theme::shortcut_hint("⌘↩", cx)
+                                        theme::shortcut_hint(cmd_or_ctrl!("enter"), cx)
                                             .text_color(cx.theme().primary_foreground.opacity(0.7)),
                                     )
                                     .on_click(

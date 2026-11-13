@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!-- Info.plist for Data Analyzer.app. scripts/bundle.sh fills in __VERSION__ and __BUILD__.
-     Keep LSItemContentTypes in sync with DATA_FILE_TYPES in crates/app/src/platform.rs. -->
+     Keep LSItemContentTypes in sync with DATA_FILE_TYPES in crates/app/src/platform/macos.rs. -->
 <plist version="1.0">
 <dict>
   <key>CFBundleName</key><string>Data Analyzer</string>

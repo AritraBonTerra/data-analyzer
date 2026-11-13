@@ -88,14 +88,14 @@ const CHART_SHARE: f32 = 0.45;
 
 pub fn init(cx: &mut App) {
     cx.bind_keys([
-        KeyBinding::new("cmd-i", ToggleStats, Some(CONTEXT)),
-        KeyBinding::new("cmd-e", ToggleSql, Some(CONTEXT)),
-        KeyBinding::new("cmd-shift-c", ToggleChart, Some(CONTEXT)),
-        KeyBinding::new("cmd-f", Find, Some(CONTEXT)),
-        KeyBinding::new("cmd-c", Copy, Some("DataTable")),
-        KeyBinding::new("cmd-shift-e", Export, Some(CONTEXT)),
-        KeyBinding::new("cmd-shift-k", ClearFilters, Some(CONTEXT)),
-        KeyBinding::new("cmd-g", GoToRow, Some(CONTEXT)),
+        KeyBinding::new(cmd_or_ctrl!("i"), ToggleStats, Some(CONTEXT)),
+        KeyBinding::new(cmd_or_ctrl!("e"), ToggleSql, Some(CONTEXT)),
+        KeyBinding::new(cmd_or_ctrl!("shift-c"), ToggleChart, Some(CONTEXT)),
+        KeyBinding::new(cmd_or_ctrl!("f"), Find, Some(CONTEXT)),
+        KeyBinding::new(cmd_or_ctrl!("c"), Copy, Some("DataTable")),
+        KeyBinding::new(cmd_or_ctrl!("shift-e"), Export, Some(CONTEXT)),
+        KeyBinding::new(cmd_or_ctrl!("shift-k"), ClearFilters, Some(CONTEXT)),
+        KeyBinding::new(cmd_or_ctrl!("g"), GoToRow, Some(CONTEXT)),
         KeyBinding::new("escape", Dismiss, Some(CONTEXT)),
     ]);
 }
@@ -1507,7 +1507,7 @@ impl Document {
 
     // ----- rendering -------------------------------------------------------------
 
-    fn render_toolbar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_toolbar(&mut self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let muted = cx.theme().muted_foreground;
         let kind = da_core::FileKind::detect(&self.path)
             .map(|k| k.label())
@@ -1517,102 +1517,105 @@ impl Document {
             .unwrap_or_default();
         let focus = self.focus_handle.clone();
 
-        TitleBar::new().h(px(TOOLBAR_HEIGHT)).child(
-            h_flex()
-                .w_full()
-                .h_full()
-                .pr(px(10.))
-                .pl(px(2.))
-                .gap(px(10.))
-                .items_center()
-                .child(
-                    Icon::empty()
-                        .path(crate::welcome::file_icon(&self.path))
-                        .size(px(16.))
-                        .text_color(cx.theme().primary),
-                )
-                .child(
-                    h_flex()
-                        .items_baseline()
-                        .gap(px(8.))
-                        .min_w_0()
-                        .child(
-                            div()
-                                .text_sm()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .truncate()
-                                .child(self.name.clone()),
-                        )
-                        .child(div().text_xs().text_color(muted).whitespace_nowrap().child(
-                            SharedString::from(if size.is_empty() {
-                                kind.to_string()
-                            } else {
-                                format!("{kind} · {size}")
-                            }),
-                        )),
-                )
-                .child(div().flex_1())
-                .child(
-                    div().w(px(240.)).child(
-                        Input::new(&self.search).small().cleanable(true).prefix(
-                            Icon::empty()
-                                .path("icons/search.svg")
-                                .size(px(13.))
-                                .text_color(muted),
+        TitleBar::new()
+            .h(px(TOOLBAR_HEIGHT))
+            .children(crate::menu_bar(window, cx))
+            .child(
+                h_flex()
+                    .w_full()
+                    .h_full()
+                    .pr(px(10.))
+                    .pl(px(2.))
+                    .gap(px(10.))
+                    .items_center()
+                    .child(
+                        Icon::empty()
+                            .path(crate::welcome::file_icon(&self.path))
+                            .size(px(16.))
+                            .text_color(cx.theme().primary),
+                    )
+                    .child(
+                        h_flex()
+                            .items_baseline()
+                            .gap(px(8.))
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .truncate()
+                                    .child(self.name.clone()),
+                            )
+                            .child(div().text_xs().text_color(muted).whitespace_nowrap().child(
+                                SharedString::from(if size.is_empty() {
+                                    kind.to_string()
+                                } else {
+                                    format!("{kind} · {size}")
+                                }),
+                            )),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        div().w(px(240.)).child(
+                            Input::new(&self.search).small().cleanable(true).prefix(
+                                Icon::empty()
+                                    .path("icons/search.svg")
+                                    .size(px(13.))
+                                    .text_color(muted),
+                            ),
                         ),
+                    )
+                    .child(
+                        Button::new("toggle-sql")
+                            .ghost()
+                            .small()
+                            .icon(Icon::empty().path("icons/terminal.svg"))
+                            .label("SQL")
+                            .tooltip(format!("SQL drawer ({})", theme::keys(cmd_or_ctrl!("e"))))
+                            .toggled(self.show_sql)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.toggle_sql(&ToggleSql, window, cx)
+                            })),
+                    )
+                    .child(
+                        Button::new("toggle-stats")
+                            .ghost()
+                            .small()
+                            .icon(Icon::empty().path("icons/chart-column.svg"))
+                            .label("Stats")
+                            .tooltip(format!("Column stats ({})", theme::keys(cmd_or_ctrl!("i"))))
+                            .toggled(self.show_stats)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.toggle_stats(&ToggleStats, window, cx)
+                            })),
+                    )
+                    .child(
+                        Button::new("toggle-chart")
+                            .ghost()
+                            .small()
+                            .icon(Icon::empty().path("icons/chart-line.svg"))
+                            .label("Chart")
+                            .tooltip(format!("Chart ({})", theme::keys(cmd_or_ctrl!("shift-c"))))
+                            .toggled(self.show_chart)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.toggle_chart(&ToggleChart, window, cx)
+                            })),
+                    )
+                    .child(
+                        Button::new("export")
+                            .ghost()
+                            .small()
+                            .icon(Icon::empty().path("icons/download.svg"))
+                            .label("Export")
+                            .dropdown_caret(true)
+                            .dropdown_menu(move |menu, _, _| {
+                                menu.action_context(focus.clone())
+                                    .menu("CSV…", Box::new(ExportAs(ExportKind::Csv)))
+                                    .menu("Parquet…", Box::new(ExportAs(ExportKind::Parquet)))
+                                    .menu("JSON Lines…", Box::new(ExportAs(ExportKind::Json)))
+                            }),
                     ),
-                )
-                .child(
-                    Button::new("toggle-sql")
-                        .ghost()
-                        .small()
-                        .icon(Icon::empty().path("icons/terminal.svg"))
-                        .label("SQL")
-                        .tooltip("SQL drawer (⌘E)")
-                        .toggled(self.show_sql)
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.toggle_sql(&ToggleSql, window, cx)
-                        })),
-                )
-                .child(
-                    Button::new("toggle-stats")
-                        .ghost()
-                        .small()
-                        .icon(Icon::empty().path("icons/chart-column.svg"))
-                        .label("Stats")
-                        .tooltip("Column stats (⌘I)")
-                        .toggled(self.show_stats)
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.toggle_stats(&ToggleStats, window, cx)
-                        })),
-                )
-                .child(
-                    Button::new("toggle-chart")
-                        .ghost()
-                        .small()
-                        .icon(Icon::empty().path("icons/chart-line.svg"))
-                        .label("Chart")
-                        .tooltip("Chart (⇧⌘C)")
-                        .toggled(self.show_chart)
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.toggle_chart(&ToggleChart, window, cx)
-                        })),
-                )
-                .child(
-                    Button::new("export")
-                        .ghost()
-                        .small()
-                        .icon(Icon::empty().path("icons/download.svg"))
-                        .label("Export")
-                        .dropdown_caret(true)
-                        .dropdown_menu(move |menu, _, _| {
-                            menu.action_context(focus.clone())
-                                .menu("CSV…", Box::new(ExportAs(ExportKind::Csv)))
-                                .menu("Parquet…", Box::new(ExportAs(ExportKind::Parquet)))
-                                .menu("JSON Lines…", Box::new(ExportAs(ExportKind::Json)))
-                        }),
-                ),
-        )
+            )
     }
 
     fn render_notice(&self, cx: &mut Context<Self>) -> Option<Div> {
@@ -2304,7 +2307,7 @@ impl Document {
 }
 
 /// Hooks for the screenshot harness (`crate::shots`).
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 impl Document {
     /// Selects the column called `name`, as clicking one of its cells does.
     pub(crate) fn select_column_named(&mut self, name: &str, cx: &mut Context<Self>) {
@@ -2590,7 +2593,7 @@ impl Render for Document {
             .size_full()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
-            .child(self.render_toolbar(cx))
+            .child(self.render_toolbar(window, cx))
             .children(self.render_notice(cx))
             .children(self.render_parts(cx))
             .children(self.render_import_strip(cx))

@@ -20,15 +20,22 @@ percent-encoding = "2"
 # them for version order and the download's checksum.
 semver = "1"
 sha2 = "0.11"
+# Already in the tree (da-core, DuckDB). The updater's check for a running
+# process (`kill`) and, on macOS, its atomic swap (`renamex_np`).
+libc = "0.2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = "0.6"
-# Already in the tree (da-core, DuckDB). The updater's atomic swap
-# (`renamex_np`) and its check for a running process (`kill`).
-libc = "0.2"
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSBundle", "NSError", "NSString", "NSURL"] }
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSWorkspace", "block2", "objc2-uniform-type-identifiers"] }
 objc2-uniform-type-identifiers = { version = "0.3", default-features = false, features = ["std", "UTType"] }
+
+# The Linux updater fetches and checks signatures in-process: curl and
+# ssh-keygen aren't on every desktop. ureq (rustls, bundled roots) is already
+# built for DuckDB's build script.
+[target.'cfg(target_os = "linux")'.dependencies]
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+ssh-key = { version = "0.6", default-features = false, features = ["std", "ed25519"] }
 
 # Only for the offscreen screenshot harness (`src/shots.rs`). These are the
 # GPUI crates gpui-kit already builds on; `test-support` turns on headless

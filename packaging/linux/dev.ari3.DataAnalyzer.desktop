@@ -1,0 +1,14 @@
+# The AppImage's desktop entry (scripts/appimage.sh). The app installs a copy with Exec
+# set to the AppImage's path when you choose Make Default for Data Files (platform/linux.rs).
+[Desktop Entry]
+Type=Application
+Name=Data Analyzer
+GenericName=Data Viewer
+Comment=Open and explore CSV, Excel, Parquet and JSON files
+Exec=data-analyzer %F
+Icon=dev.ari3.DataAnalyzer
+Terminal=false
+Categories=Office;Viewer;
+Keywords=csv;tsv;excel;xlsx;parquet;json;sql;table;
+MimeType=text/csv;text/tab-separated-values;application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;application/vnd.ms-excel;application/vnd.apache.parquet;application/json;application/x-ndjson;application/jsonl;
+StartupWMClass=dev.ari3.DataAnalyzer

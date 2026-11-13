@@ -1,4 +1,4 @@
-# Formats, lints and tests every pull request and every push to main.
+# Formats, lints and tests every pull request and every push to main, on macOS and Linux.
 name: CI
 
 on:
@@ -45,5 +45,35 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       # Normally about 6 minutes. The limit stops a hung test from holding the run for an hour.
+      - run: cargo test --workspace
+        timeout-minutes: 30
+
+  # The Linux build: lint and tests on the oldest runner, the same one the
+  # AppImage is built on. Formatting is the same everywhere, so it's checked once.
+  linux:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install the windowing libraries GPUI links
+        run: scripts/linux-deps.sh
+
+      - name: Install Rust from rust-toolchain.toml
+        run: rustup toolchain install
+
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ci-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          restore-keys: ci-${{ runner.os }}-
+
+      - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
         timeout-minutes: 30

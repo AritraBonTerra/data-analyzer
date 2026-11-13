@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- File types shared-mime-info doesn't declare, like UTImportedTypeDeclarations in
+     packaging/Info.plist. Make Default for Data Files installs this into
+     ~/.local/share/mime/packages. Keep in sync with MimeType= in the .desktop file. -->
+<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+  <mime-type type="application/vnd.apache.parquet">
+    <comment>Apache Parquet</comment>
+    <glob pattern="*.parquet"/>
+    <glob pattern="*.pq"/>
+  </mime-type>
+  <mime-type type="application/jsonl">
+    <comment>JSON Lines</comment>
+    <sub-class-of type="text/plain"/>
+    <glob pattern="*.jsonl"/>
+  </mime-type>
+  <mime-type type="application/x-ndjson">
+    <comment>Newline-delimited JSON</comment>
+    <sub-class-of type="text/plain"/>
+    <glob pattern="*.ndjson"/>
+  </mime-type>
+</mime-info>

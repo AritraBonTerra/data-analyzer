@@ -226,7 +226,7 @@ impl Render for Welcome {
                                     .on_click(cx.listener(|_, _, _, cx| cx.emit(WelcomeEvent::OpenDialog)))
                                     .child("Open File…")
                                     .child(
-                                        theme::shortcut_hint("⌘O", cx)
+                                        theme::shortcut_hint(cmd_or_ctrl!("o"), cx)
                                             .text_color(cx.theme().primary_foreground.opacity(0.7)),
                                     ),
                             )
