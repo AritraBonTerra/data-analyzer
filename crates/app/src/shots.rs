@@ -36,7 +36,7 @@ use da_core::{Aggregate, ChartKind, ChartSpec, Filter, FilterOp, ReadAs};
 use crate::document::{AdjustImport, Document, ToggleChart, ToggleStats};
 use crate::recent::RecentStore;
 use crate::workspace::Workspace;
-use crate::{Windows, document, filter, import, sql};
+use crate::{Windows, document, filter, import};
 
 const MESSY: &str = "crates/core/tests/fixtures/messy";
 
@@ -75,6 +75,16 @@ fn scenarios() -> Vec<Scenario> {
             .select("revenue")
             .action(ToggleStats),
         Scenario::new("clean-sales-light", &sales).light(),
+        // Zoom In / Zoom Out: text and the grid's rows grow together.
+        Scenario::new("zoom-85", &sales).with(zoom(0.85)),
+        Scenario::new("zoom-150-stats", &sales)
+            .with(zoom(1.5))
+            .select("revenue")
+            .action(ToggleStats),
+        Scenario::new("zoom-150-chart-light", &sales)
+            .light()
+            .with(zoom(1.5))
+            .action(ToggleChart),
         Scenario::new("report-preamble", &report),
         Scenario::new("report-preamble-light", &report).light(),
         Scenario::new("report-notes", &report).with(|doc, window, cx| doc.show_notes(window, cx)),
@@ -438,6 +448,16 @@ fn update_card(
     move |_, _, cx| crate::update::show_for_shots(case, cx)
 }
 
+/// A step that draws the app at `zoom`, as Zoom In and Zoom Out do.
+fn zoom(zoom: f32) -> impl FnOnce(&mut Document, &mut Window, &mut Context<Document>) {
+    move |_, _, cx| {
+        Theme::update(cx, |theme| {
+            theme.font_size = px(crate::theme::BASE_FONT_SIZE * zoom);
+            theme.mono_font_size = px(crate::theme::BASE_MONO_FONT_SIZE * zoom);
+        })
+    }
+}
+
 /// Opens the Details popover, as clicking "Details" in the strip does.
 fn details(doc: &mut Document, window: &mut Window, cx: &mut Context<Document>) {
     doc.show_details(window, cx);
@@ -537,9 +557,9 @@ impl Scenario {
         let (window, workspace) = cx.update(|cx| {
             gpui_kit::init(cx);
             filter::init(cx);
-            sql::init(cx);
             import::init(cx);
             document::init(cx);
+            crate::keymap::init(cx);
             cx.set_global(Windows::default());
             // Never written: nothing in a scenario edits the recent list.
             cx.set_global(RecentStore::load(out_dir.join("recent.json")));

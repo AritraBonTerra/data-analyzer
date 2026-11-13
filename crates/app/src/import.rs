@@ -460,7 +460,7 @@ impl ImportPanel {
                     .w(px(64.))
                     .pl(px(10.))
                     .flex_shrink_0()
-                    .text_size(px(10.))
+                    .text_size(theme::scaled(10., cx))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(if header {
                         palette.accent
@@ -545,7 +545,7 @@ impl ImportPanel {
                     .min_w(relative(1.))
                     .pb(px(12.))
                     .font_family(cx.theme().mono_font_family.clone())
-                    .text_size(px(12.))
+                    .text_size(theme::scaled(12., cx))
                     .children(children),
             )
             .into_any_element()
@@ -655,7 +655,7 @@ impl ImportPanel {
         );
 
         v_flex()
-            .w(px(STATS_WIDTH))
+            .w(theme::scaled(STATS_WIDTH, cx))
             .flex_shrink_0()
             .h_full()
             .border_l_1()

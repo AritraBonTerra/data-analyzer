@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 
-use gpui_kit::component::{ActiveTheme, Theme, TitleBar, h_flex};
+use gpui_kit::component::{ActiveTheme, TitleBar, h_flex};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
@@ -26,7 +26,7 @@ pub struct Workspace {
 impl Workspace {
     pub fn new(path: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let appearance = cx.observe_window_appearance(window, |_, window, cx| {
-            Theme::sync_system_appearance(Some(window), cx);
+            crate::settings::apply_theme(Some(window), cx);
             cx.notify();
         });
         // The menus show the active window's document (its panels, whether
@@ -141,7 +141,7 @@ impl Render for Workspace {
                 .flex_col()
                 .child(
                     TitleBar::new()
-                        .h(px(TOOLBAR_HEIGHT))
+                        .h(crate::theme::scaled(TOOLBAR_HEIGHT, cx))
                         .children(crate::menu_bar(window, cx))
                         .child(
                             h_flex()

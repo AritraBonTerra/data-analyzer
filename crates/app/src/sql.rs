@@ -10,14 +10,8 @@ use crate::theme::{self, tabular};
 
 actions!(sql, [RunQuery, CancelQuery]);
 
-const CONTEXT: &str = "SqlPanel";
-
-pub fn init(cx: &mut App) {
-    cx.bind_keys([
-        KeyBinding::new(cmd_or_ctrl!("enter"), RunQuery, Some(CONTEXT)),
-        KeyBinding::new(cmd_or_ctrl!("."), CancelQuery, Some(CONTEXT)),
-    ]);
-}
+/// The SQL editor's key context. Run and Cancel are bound in `keymap`.
+pub const CONTEXT: &str = "SqlPanel";
 
 #[derive(Clone, Debug)]
 pub enum SqlEvent {
@@ -259,10 +253,9 @@ impl Render for SqlPanel {
                             })
                             .child(
                                 self.button("run-query", "Run", true, cx)
-                                    .child(
-                                        theme::shortcut_hint(cmd_or_ctrl!("enter"), cx)
-                                            .text_color(cx.theme().primary_foreground.opacity(0.7)),
-                                    )
+                                    .children(theme::shortcut_hint("run_query", cx).map(|hint| {
+                                        hint.text_color(cx.theme().primary_foreground.opacity(0.7))
+                                    }))
                                     .on_click(
                                         cx.listener(|this, _, _, cx| this.run(&RunQuery, cx)),
                                     ),
@@ -273,7 +266,7 @@ impl Render for SqlPanel {
                 div()
                     .flex_1()
                     .min_h_0()
-                    .text_size(px(13.))
+                    .text_size(theme::scaled(13., cx))
                     .child(Editor::new(&self.editor).appearance(false).h_full()),
             )
             .when_some(error, |this, message| {

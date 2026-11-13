@@ -225,10 +225,9 @@ impl Render for Welcome {
                                     .hover(|s| s.bg(cx.theme().primary_hover))
                                     .on_click(cx.listener(|_, _, _, cx| cx.emit(WelcomeEvent::OpenDialog)))
                                     .child("Open File…")
-                                    .child(
-                                        theme::shortcut_hint(cmd_or_ctrl!("o"), cx)
-                                            .text_color(cx.theme().primary_foreground.opacity(0.7)),
-                                    ),
+                                    .children(theme::shortcut_hint("open", cx).map(|hint| {
+                                        hint.text_color(cx.theme().primary_foreground.opacity(0.7))
+                                    })),
                             )
                             .child(
                                 div()
