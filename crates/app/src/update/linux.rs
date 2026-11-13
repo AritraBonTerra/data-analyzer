@@ -9,9 +9,11 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
-use anyhow::{Context as _, Result, bail, ensure};
+use anyhow::{Context as _, Result, anyhow, bail, ensure};
 
 use super::{CANCELLED, Manifest, Source};
 
@@ -57,7 +59,8 @@ pub fn fetch_manifest(source: &Source) -> Result<String> {
 
 /// Downloads the manifest's AppImage to `dest`. About five times a second it
 /// calls `progress` with the bytes so far; when that returns `false`, the
-/// download stops and the partial file is deleted.
+/// download stops and the partial file is deleted. Gives up after 30 seconds
+/// with no data, as curl's speed limit does on macOS.
 pub fn download(
     source: &Source,
     manifest: &Manifest,
@@ -67,44 +70,76 @@ pub fn download(
     if let Some(dir) = dest.parent() {
         fs::create_dir_all(dir)?;
     }
-    let fetched = (|| -> Result<()> {
-        // Long enough for a slow connection, short of hanging forever.
-        let mut response = agent(source, Duration::from_secs(30 * 60))
-            .get(&manifest.asset)
-            .call()?;
-        let mut body = response.body_mut().as_reader();
-        let mut file = fs::File::create(dest)?;
-        let mut buffer = vec![0; 1 << 16];
-        let (mut done, mut shown) = (0u64, Instant::now());
-        loop {
-            let read = body.read(&mut buffer)?;
-            if read == 0 {
-                break;
-            }
-            done += read as u64;
-            ensure!(
-                done <= manifest.size,
-                "The download is bigger than the {} bytes the release lists.",
-                manifest.size
-            );
-            file.write_all(&buffer[..read])?;
-            if shown.elapsed() >= Duration::from_millis(200) {
-                shown = Instant::now();
-                if !progress(done) {
-                    bail!(CANCELLED);
-                }
-            }
+    let file = fs::File::create(dest)?;
+    // The transfer runs on a thread of its own, so a stalled connection can't
+    // keep this loop from noticing Cancel or the stall. `stop` ends it at its
+    // next read; one stuck in a read ends with the 30 minute request limit.
+    let stop = Arc::new(AtomicBool::new(false));
+    let (done_tx, done_rx) = mpsc::channel();
+    let transfer = {
+        let agent = agent(source, Duration::from_secs(30 * 60));
+        let (url, size, stop) = (manifest.asset.clone(), manifest.size, stop.clone());
+        move || {
+            let _ = done_tx.send(fetch(&agent, &url, size, file, &stop));
         }
-        file.sync_all()?;
-        Ok(())
-    })();
-    if let Err(err) = fetched {
+    };
+    std::thread::spawn(transfer);
+
+    let (mut seen, mut moved) = (0, Instant::now());
+    let result = loop {
+        match done_rx.recv_timeout(Duration::from_millis(200)) {
+            Ok(fetched) => break fetched.context("Couldn't download the update"),
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                break Err(anyhow!("Couldn't download the update."));
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+        }
+        let done = fs::metadata(dest).map(|m| m.len()).unwrap_or(0);
+        if done != seen {
+            (seen, moved) = (done, Instant::now());
+        }
+        if !progress(done) {
+            break Err(anyhow!(CANCELLED));
+        }
+        if moved.elapsed() > Duration::from_secs(30) {
+            break Err(anyhow!(
+                "Couldn't download the update: no data for 30 seconds."
+            ));
+        }
+    };
+    if result.is_err() {
+        stop.store(true, Ordering::Relaxed);
         let _ = fs::remove_file(dest);
-        if err.to_string() == CANCELLED {
-            return Err(err);
-        }
-        return Err(err.context("Couldn't download the update"));
     }
+    result
+}
+
+/// Streams `url` into `file`, refusing more than `size` bytes, until done or `stop`.
+fn fetch(
+    agent: &ureq::Agent,
+    url: &str,
+    size: u64,
+    mut file: fs::File,
+    stop: &AtomicBool,
+) -> Result<()> {
+    let mut response = agent.get(url).call()?;
+    let mut body = response.body_mut().as_reader();
+    let mut buffer = vec![0; 1 << 16];
+    let mut done = 0u64;
+    loop {
+        ensure!(!stop.load(Ordering::Relaxed), CANCELLED);
+        let read = body.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        done += read as u64;
+        ensure!(
+            done <= size,
+            "The download is bigger than the {size} bytes the release lists."
+        );
+        file.write_all(&buffer[..read])?;
+    }
+    file.sync_all()?;
     Ok(())
 }
 

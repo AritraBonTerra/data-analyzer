@@ -1263,6 +1263,53 @@ pub(crate) mod tests {
         port
     }
 
+    /// A server that sends a response's headers and first bytes, then stalls.
+    fn stalled_server() -> String {
+        use std::io::{BufRead, BufReader, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let mut line = String::new();
+                let mut reader = BufReader::new(&stream);
+                while reader.read_line(&mut line).is_ok_and(|n| n > 2) {
+                    line.clear();
+                }
+                let mut stream = &stream;
+                let _ =
+                    stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1000000\r\n\r\nfirst");
+                std::thread::sleep(std::time::Duration::from_secs(120));
+            }
+        });
+        format!("http://127.0.0.1:{port}/releases")
+    }
+
+    #[test]
+    fn cancels_a_stalled_download() {
+        let dir = scratch("stalled");
+        let base = stalled_server();
+        let manifest = Manifest {
+            asset: format!("{base}/download/v9.0.0/{}", os::DOWNLOAD),
+            size: 1_000_000,
+            ..serde_json::from_value(manifest_json("9.0.0")).unwrap()
+        };
+        let dest = dir.join(os::DOWNLOAD);
+        let started = std::time::Instant::now();
+        let mut calls = 0;
+        let err = super::download(&source(&base, ""), &manifest, &dest, |_| {
+            calls += 1;
+            calls < 5
+        })
+        .unwrap_err();
+        assert_eq!(err.to_string(), "Cancelled.");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "Cancel waited for the stalled connection"
+        );
+        assert!(!dest.exists());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn prepares_from_a_server_and_stops_between_steps() {
         let dir = scratch("engine");
