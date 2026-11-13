@@ -268,14 +268,21 @@ fn same_keys(a: &Keystroke, b: &Keystroke) -> bool {
     a.modifiers == b.modifiers && a.key == b.key
 }
 
-/// Whether command `id`'s shortcuts include `keys` (e.g. `"secondary-enter"`).
-pub fn has_shortcut(id: &str, keys: &str, cx: &App) -> bool {
-    let (Some(command), Some(wanted)) = (command(id), parse(keys, cx)) else {
-        return false;
-    };
-    shortcuts(command, cx)
-        .iter()
-        .any(|keys| parse(keys, cx).is_some_and(|keys| same_keys(&keys, &wanted)))
+impl Command {
+    /// A new instance of the command's action, to dispatch.
+    pub fn action(&self) -> Box<dyn Action> {
+        (self.action)()
+    }
+}
+
+/// The command whose shortcuts include `keys` (e.g. `"secondary-enter"`), if any.
+pub fn owner(keys: &str, cx: &App) -> Option<&'static Command> {
+    let wanted = parse(keys, cx)?;
+    COMMANDS.iter().find(|command| {
+        shortcuts(command, cx)
+            .iter()
+            .any(|keys| parse(keys, cx).is_some_and(|keys| same_keys(&keys, &wanted)))
+    })
 }
 
 /// The other commands that have any of `keystrokes`, each with the

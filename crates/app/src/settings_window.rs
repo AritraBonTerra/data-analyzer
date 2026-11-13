@@ -903,16 +903,7 @@ mod tests {
         cx.simulate_keystrokes("cmd-q");
         assert_eq!(quits.get(), 1, "⌘Q didn't quit after resetting Quit");
 
-        // The SQL editor's own ⌘Enter runs a query only while that's Run Query's shortcut.
-        let has = |cx: &mut VisualTestContext| {
-            cx.update(|_, cx| keymap::has_shortcut("run_query", "secondary-enter", cx))
-        };
-        assert!(has(&mut cx));
-        cx.update(|_, cx| keymap::assign("run_query", None, cx));
-        assert!(!has(&mut cx));
-
         cx.update(|_, cx| keymap::reset_all(cx));
-        assert!(has(&mut cx));
         assert!(app_cx.update(|cx| cx.global::<SettingsStore>().settings.shortcuts.is_empty()));
         let _ = std::fs::remove_dir_all(dir);
         // Dropping the app here deadlocks in gpui-base's text-layout cleanup
