@@ -32,6 +32,7 @@ use crate::filter::{FilterEditor, FilterEvent, MenuFor};
 use crate::format::{formatted, group_digits, percent, plural};
 use crate::grid::{GridDelegate, GridEvent, PREVIEW_ROWS};
 use crate::import::{ImportEvent, ImportPanel, Reading};
+use crate::keymap;
 use crate::platform;
 use crate::sql::{QueryStatus, SqlEvent, SqlPanel};
 use crate::stats::{StatsEvent, StatsPanel};
@@ -80,7 +81,9 @@ impl From<ExportKind> for ExportFormat {
 #[action(namespace = document, no_json)]
 pub struct ExportAs(pub ExportKind);
 
-const CONTEXT: &str = "Document";
+/// The key context of a document window; shortcuts in `keymap` bound here
+/// work only while a document has focus.
+pub const CONTEXT: &str = "Document";
 const SEARCH_DEBOUNCE: Duration = Duration::from_millis(220);
 const SQL_HEIGHT: f32 = 210.0;
 /// The share of the grid's height the chart panel takes when open.
@@ -88,14 +91,8 @@ const CHART_SHARE: f32 = 0.45;
 
 pub fn init(cx: &mut App) {
     cx.bind_keys([
-        KeyBinding::new(cmd_or_ctrl!("i"), ToggleStats, Some(CONTEXT)),
-        KeyBinding::new(cmd_or_ctrl!("e"), ToggleSql, Some(CONTEXT)),
-        KeyBinding::new(cmd_or_ctrl!("shift-c"), ToggleChart, Some(CONTEXT)),
-        KeyBinding::new(cmd_or_ctrl!("f"), Find, Some(CONTEXT)),
+        // The panel, find and export shortcuts can be changed, so they're in `keymap`.
         KeyBinding::new(cmd_or_ctrl!("c"), Copy, Some("DataTable")),
-        KeyBinding::new(cmd_or_ctrl!("shift-e"), Export, Some(CONTEXT)),
-        KeyBinding::new(cmd_or_ctrl!("shift-k"), ClearFilters, Some(CONTEXT)),
-        KeyBinding::new(cmd_or_ctrl!("g"), GoToRow, Some(CONTEXT)),
         KeyBinding::new("escape", Dismiss, Some(CONTEXT)),
     ]);
 }
@@ -276,6 +273,27 @@ pub struct Document {
 }
 
 impl Document {
+    /// Redraws the grid's columns when the zoom changes. The table keeps
+    /// column widths as drawn, so they're converted back to actual size (with
+    /// any resizing by hand) and drawn again at the new zoom.
+    fn follow_zoom(cx: &mut Context<Self>) -> Subscription {
+        let mut zoom = theme::zoom(cx);
+        cx.observe_global::<gpui_kit::component::Theme>(move |this, cx| {
+            let before = std::mem::replace(&mut zoom, theme::zoom(cx));
+            if before == zoom {
+                return;
+            }
+            this.table.update(cx, |table, cx| {
+                let columns = table.delegate().column_count();
+                let widths = (1..=columns)
+                    .filter_map(|ix| table.col_width(ix).map(|w| f32::from(w) / before))
+                    .collect();
+                table.delegate_mut().set_widths(widths);
+                table.refresh(cx);
+            });
+        })
+    }
+
     pub fn new(path: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let name: SharedString = path
             .file_name()
@@ -310,6 +328,7 @@ impl Document {
             cx.subscribe_in(&chart, window, Self::on_chart_event),
             cx.subscribe_in(&sql, window, Self::on_sql_event),
             cx.subscribe_in(&import, window, Self::on_import_event),
+            Self::follow_zoom(cx),
         ];
 
         let mut this = Self {
@@ -630,9 +649,11 @@ impl Document {
         } else {
             "This file has no rows."
         };
+        let zoom = theme::zoom(cx);
         self.table.update(cx, |table, cx| {
+            // The table reports widths as drawn; the delegate keeps them at actual size.
             let widths: Vec<f32> = (0..frame.columns.len())
-                .filter_map(|ix| table.col_width(ix + 1).map(f32::from))
+                .filter_map(|ix| table.col_width(ix + 1).map(|w| f32::from(w) / zoom))
                 .collect();
             let delegate = table.delegate_mut();
             delegate.set_frame(dataset, frame, widths);
@@ -1518,7 +1539,7 @@ impl Document {
         let focus = self.focus_handle.clone();
 
         TitleBar::new()
-            .h(px(TOOLBAR_HEIGHT))
+            .h(theme::scaled(TOOLBAR_HEIGHT, cx))
             .children(crate::menu_bar(window, cx))
             .child(
                 h_flex()
@@ -1571,7 +1592,7 @@ impl Document {
                             .small()
                             .icon(Icon::empty().path("icons/terminal.svg"))
                             .label("SQL")
-                            .tooltip(format!("SQL drawer ({})", theme::keys(cmd_or_ctrl!("e"))))
+                            .tooltip(keymap::tooltip("SQL drawer", "sql", cx))
                             .toggled(self.show_sql)
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.toggle_sql(&ToggleSql, window, cx)
@@ -1583,7 +1604,7 @@ impl Document {
                             .small()
                             .icon(Icon::empty().path("icons/chart-column.svg"))
                             .label("Stats")
-                            .tooltip(format!("Column stats ({})", theme::keys(cmd_or_ctrl!("i"))))
+                            .tooltip(keymap::tooltip("Column stats", "stats", cx))
                             .toggled(self.show_stats)
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.toggle_stats(&ToggleStats, window, cx)
@@ -1595,7 +1616,7 @@ impl Document {
                             .small()
                             .icon(Icon::empty().path("icons/chart-line.svg"))
                             .label("Chart")
-                            .tooltip(format!("Chart ({})", theme::keys(cmd_or_ctrl!("shift-c"))))
+                            .tooltip(keymap::tooltip("Chart", "chart", cx))
                             .toggled(self.show_chart)
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.toggle_chart(&ToggleChart, window, cx)
@@ -1856,7 +1877,7 @@ impl Document {
                             .w(px(40.))
                             .flex_shrink_0()
                             .pt(px(1.))
-                            .text_size(px(10.))
+                            .text_size(theme::scaled(10., cx))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(muted.opacity(0.8))
                             .child(role),
@@ -2364,7 +2385,11 @@ impl Document {
             .as_ref()
             .and_then(|f| f.columns.iter().position(|c| c.name == name))
             .unwrap_or_else(|| panic!("{} has no column named {name:?}", self.name));
-        self.open_header_menu(col, point(px(360.), px(TOOLBAR_HEIGHT + 64.)), cx);
+        self.open_header_menu(
+            col,
+            point(px(360.), theme::scaled(TOOLBAR_HEIGHT + 64., cx)),
+            cx,
+        );
     }
 
     /// The chart panel, for steps that set its fields as a user would.
@@ -2397,7 +2422,7 @@ impl Document {
     /// below the strip's right end.
     pub(crate) fn show_details(&mut self, window: &Window, cx: &mut Context<Self>) {
         let right = window.viewport_size().width - px(12.);
-        self.details_at = Some(point(right, px(TOOLBAR_HEIGHT + 20.)));
+        self.details_at = Some(point(right, theme::scaled(TOOLBAR_HEIGHT + 20., cx)));
         cx.notify();
     }
 
@@ -2410,7 +2435,7 @@ impl Document {
     /// below the strip's right end.
     pub(crate) fn show_notes(&mut self, window: &Window, cx: &mut Context<Self>) {
         let right = window.viewport_size().width - px(12.);
-        self.notes_at = Some(point(right, px(TOOLBAR_HEIGHT + 20.)));
+        self.notes_at = Some(point(right, theme::scaled(TOOLBAR_HEIGHT + 20., cx)));
         cx.notify();
     }
 }
@@ -2541,18 +2566,22 @@ impl Render for Document {
                             )
                         })
                         .child(
-                            div().flex_1().min_h_0().text_size(px(13.)).child(
-                                DataTable::new(&self.table)
-                                    .focus_ring(false)
-                                    .bordered(false)
-                                    .with_size(Size::Size(px(ROW_HEIGHT)))
-                                    .header_row_height(px(HEADER_HEIGHT)),
-                            ),
+                            div()
+                                .flex_1()
+                                .min_h_0()
+                                .text_size(theme::scaled(13., cx))
+                                .child(
+                                    DataTable::new(&self.table)
+                                        .focus_ring(false)
+                                        .bordered(false)
+                                        .with_size(Size::Size(theme::scaled(ROW_HEIGHT, cx)))
+                                        .header_row_height(theme::scaled(HEADER_HEIGHT, cx)),
+                                ),
                         )
                         .when(self.show_sql, |this| {
                             this.child(
                                 div()
-                                    .h(px(SQL_HEIGHT))
+                                    .h(theme::scaled(SQL_HEIGHT, cx))
                                     .flex_shrink_0()
                                     .child(self.sql.clone()),
                             )
@@ -2561,7 +2590,7 @@ impl Render for Document {
                 .when(self.show_stats, |this| {
                     this.child(
                         div()
-                            .w(px(STATS_WIDTH))
+                            .w(theme::scaled(STATS_WIDTH, cx))
                             .flex_shrink_0()
                             .child(self.stats.clone()),
                     )

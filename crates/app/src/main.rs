@@ -26,9 +26,12 @@ mod filter;
 mod format;
 mod grid;
 mod import;
+mod keymap;
 mod pages;
 mod platform;
 mod recent;
+mod settings;
+mod settings_window;
 #[cfg(all(test, target_os = "macos"))]
 mod shots;
 mod sql;
@@ -52,6 +55,7 @@ use crate::document::{
     ToggleSql, ToggleStats,
 };
 use crate::recent::RecentStore;
+use crate::settings::{OpenSettings, ResetZoom, ZoomIn, ZoomOut};
 use crate::workspace::Workspace;
 
 actions!(
@@ -134,11 +138,12 @@ fn main() {
     app.run(move |cx| {
         gpui_kit::init(cx);
         filter::init(cx);
-        sql::init(cx);
         import::init(cx);
         document::init(cx);
+        // After the other modules: it captures their bindings, adds the
+        // changeable shortcuts and applies the theme.
+        settings::init(platform::data_dir().join("settings.json"), cx);
         cx.set_app_identity(platform::BUNDLE_ID, "Data Analyzer");
-        Theme::sync_system_appearance(None, cx);
         Theme::sync_scrollbar_appearance(cx);
         cx.set_global(Windows::default());
         cx.set_global(MenuBars::default());
@@ -155,13 +160,6 @@ fn main() {
         })
         .detach();
 
-        cx.bind_keys([
-            KeyBinding::new(cmd_or_ctrl!("o"), Open, None),
-            KeyBinding::new(cmd_or_ctrl!("n"), NewWindow, None),
-            KeyBinding::new(cmd_or_ctrl!("w"), CloseWindow, None),
-            KeyBinding::new(cmd_or_ctrl!("q"), Quit, None),
-            KeyBinding::new(cmd_or_ctrl!("m"), Minimize, None),
-        ]);
         cx.on_action(|_: &Quit, cx| cx.quit());
         cx.on_action(|_: &Open, cx| open_dialog(cx));
         cx.on_action(|_: &NewWindow, cx| new_window(None, cx));
@@ -221,9 +219,13 @@ fn main() {
             if cx.try_global::<MenuWindow>().and_then(|w| w.0) == Some(id) {
                 cx.set_global(MenuWindow(None));
             }
+            settings_window::closed(id, cx);
             // A macOS app stays in the Dock with no windows; on Linux nothing
             // would be left to show it is running.
-            if cfg!(not(target_os = "macos")) && cx.global::<Windows>().0.is_empty() {
+            if cfg!(not(target_os = "macos"))
+                && cx.global::<Windows>().0.is_empty()
+                && !settings_window::is_open(cx)
+            {
                 cx.quit();
             }
         })
@@ -448,6 +450,10 @@ fn rebuild_menus(cx: &mut App) {
         MenuItem::action("SQL Panel", ToggleSql).checked(sql),
         MenuItem::separator(),
         MenuItem::action("Show File Data", ShowFileData),
+        MenuItem::separator(),
+        MenuItem::action("Zoom In", ZoomIn),
+        MenuItem::action("Zoom Out", ZoomOut),
+        MenuItem::action("Actual Size", ResetZoom),
     ]);
 
     // macOS puts the app's own items in a menu named after it; Linux apps
@@ -457,6 +463,8 @@ fn rebuild_menus(cx: &mut App) {
             Menu::new("Data Analyzer").items([
                 MenuItem::action("About Data Analyzer", About),
                 MenuItem::action("Check for Updates…", CheckForUpdates),
+                MenuItem::separator(),
+                MenuItem::action("Settings…", OpenSettings),
                 MenuItem::separator(),
                 MenuItem::action("Make Default for Data Files…", MakeDefault),
                 MenuItem::separator(),
@@ -476,8 +484,12 @@ fn rebuild_menus(cx: &mut App) {
             ]),
         ]
     } else {
-        file.items
-            .extend([MenuItem::separator(), MenuItem::action("Quit", Quit)]);
+        file.items.extend([
+            MenuItem::separator(),
+            MenuItem::action("Settings…", OpenSettings),
+            MenuItem::separator(),
+            MenuItem::action("Quit", Quit),
+        ]);
         vec![
             file,
             edit,

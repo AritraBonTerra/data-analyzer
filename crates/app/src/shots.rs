@@ -2,7 +2,7 @@
 //!
 //! Each [`Scenario`] opens a file in the app's own `Workspace` view, with its
 //! theme, fonts and icons, in a 1180×760 window (or narrower) that Metal renders at 2× and
-//! never puts on screen. It runs the scenario's steps, drives every
+//! never puts on screen. A [`Scenario::settings`] one opens the Settings window instead. It runs the scenario's steps, drives every
 //! background job (open, load, profile, page fetches, stats) to completion,
 //! and writes `<name>.png`.
 //!
@@ -18,8 +18,9 @@
 //!
 //! To add a scenario, add a line to [`scenarios`]: a name, a file (relative to
 //! the repo root), then any of `.light()`, `.width(points)`, `.select(column)`,
-//! `.action(A)`, `.wait()` (lets an animation finish) and
+//! `.theme(name)`, `.action(A)`, `.wait()` (lets an animation finish) and
 //! `.with(|doc, window, cx| ...)` for anything the others don't cover.
+//! Settings scenarios take `.settings_with(|view, window, cx| ...)`.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -27,16 +28,18 @@ use std::time::Duration;
 
 use gpui_kit::component::{Theme, ThemeMode, TitleBar};
 use gpui_kit::{
-    Action, AnyWindowHandle, App, AppContext, Bounds, Context, Entity, HeadlessAppContext, Window,
-    WindowBounds, WindowOptions, point, px, size,
+    Action, AnyWindowHandle, App, AppContext, Bounds, Context, Entity, HeadlessAppContext,
+    Keystroke, Window, WindowBounds, WindowOptions, point, px, size,
 };
 
 use da_core::{Aggregate, ChartKind, ChartSpec, Filter, FilterOp, ReadAs};
 
 use crate::document::{AdjustImport, Document, ToggleChart, ToggleStats};
 use crate::recent::RecentStore;
+use crate::settings::{self, Appearance, SettingsStore};
+use crate::settings_window::{Page, SettingsView};
 use crate::workspace::Workspace;
-use crate::{Windows, document, filter, import, sql};
+use crate::{Windows, document, filter, import};
 
 const MESSY: &str = "crates/core/tests/fixtures/messy";
 
@@ -75,6 +78,42 @@ fn scenarios() -> Vec<Scenario> {
             .select("revenue")
             .action(ToggleStats),
         Scenario::new("clean-sales-light", &sales).light(),
+        // Zoom In / Zoom Out: text and the grid's rows grow together.
+        Scenario::new("zoom-85", &sales).with(zoom(0.85)),
+        Scenario::new("zoom-150-stats", &sales)
+            .with(zoom(1.5))
+            .select("revenue")
+            .action(ToggleStats),
+        Scenario::new("zoom-150-chart-light", &sales)
+            .light()
+            .with(zoom(1.5))
+            .action(ToggleChart),
+        // Each theme, light and dark, with a sketch row, stats and a chart
+        // to judge its accent by.
+        themed("theme-paper-light", "Paper", &sales).light(),
+        themed("theme-paper-dark", "Paper", &sales),
+        themed("theme-slate-light", "Slate", &sales).light(),
+        themed("theme-slate-dark", "Slate", &sales),
+        themed("theme-contrast-light", "High Contrast", &sales).light(),
+        themed("theme-contrast-dark", "High Contrast", &sales),
+        // The Settings window.
+        Scenario::settings("settings-appearance").light(),
+        Scenario::settings("settings-appearance-paper-dark")
+            .theme("Paper")
+            .settings_with(|_, _, cx| SettingsStore::edit(cx, |s| s.zoom = 1.25)),
+        Scenario::settings("settings-shortcuts").settings_with(shortcuts_page),
+        // Recording Find's shortcut, after a key that can't be one.
+        Scenario::settings("settings-shortcuts-recording")
+            .light()
+            .theme("Slate")
+            .settings_with(shortcuts_page)
+            .settings_with(|view, window, cx| view.start_recording("find", window, cx))
+            .settings_with(press("k")),
+        // Find takes Export's shortcut.
+        Scenario::settings("settings-shortcuts-conflict")
+            .settings_with(shortcuts_page)
+            .settings_with(|view, window, cx| view.start_recording("find", window, cx))
+            .settings_with(press("cmd-shift-e")),
         Scenario::new("report-preamble", &report),
         Scenario::new("report-preamble-light", &report).light(),
         Scenario::new("report-notes", &report).with(|doc, window, cx| doc.show_notes(window, cx)),
@@ -388,6 +427,28 @@ fn scenarios() -> Vec<Scenario> {
     ]
 }
 
+/// A document in theme `theme`, with the stats and chart panels open.
+fn themed(name: &'static str, theme: &'static str, file: &str) -> Scenario {
+    Scenario::new(name, file)
+        .theme(theme)
+        .select("revenue")
+        .action(ToggleStats)
+        .action(ToggleChart)
+        .with(chart(ChartKind::Bar, "region", &["revenue"], None))
+}
+
+/// Shows Settings' Keyboard Shortcuts page.
+fn shortcuts_page(view: &mut SettingsView, _: &mut Window, cx: &mut Context<SettingsView>) {
+    view.show_page(Page::Shortcuts, cx);
+}
+
+/// A step that presses `keys` while Settings records a shortcut.
+fn press(
+    keys: &'static str,
+) -> impl FnOnce(&mut SettingsView, &mut Window, &mut Context<SettingsView>) {
+    move |view, _, cx| view.record(&Keystroke::parse(keys).unwrap(), cx)
+}
+
 /// Writes `text` to a scratch file for a scenario and returns its path.
 fn generated(name: &str, text: String) -> PathBuf {
     let path = std::env::temp_dir().join(format!("da-shots-{name}"));
@@ -438,6 +499,16 @@ fn update_card(
     move |_, _, cx| crate::update::show_for_shots(case, cx)
 }
 
+/// A step that draws the app at `zoom`, as Zoom In and Zoom Out do.
+fn zoom(zoom: f32) -> impl FnOnce(&mut Document, &mut Window, &mut Context<Document>) {
+    move |_, _, cx| {
+        Theme::update(cx, |theme| {
+            theme.font_size = px(crate::theme::BASE_FONT_SIZE * zoom);
+            theme.mono_font_size = px(crate::theme::BASE_MONO_FONT_SIZE * zoom);
+        })
+    }
+}
+
 /// Opens the Details popover, as clicking "Details" in the strip does.
 fn details(doc: &mut Document, window: &mut Window, cx: &mut Context<Document>) {
     doc.show_details(window, cx);
@@ -454,13 +525,20 @@ const WINDOW: (f32, f32) = (1180., 760.);
 /// Upper bound on draw-and-run rounds while waiting for work to land.
 const MAX_ROUNDS: usize = 200;
 
-/// One screenshot: a file, a theme and the steps to run once it has loaded.
+/// The Settings window's size, as the app opens it.
+const SETTINGS_WINDOW: (f32, f32) = (760., 560.);
+
+/// One screenshot: a file (or Settings), a theme and the steps to run once
+/// it has loaded.
 struct Scenario {
     name: &'static str,
-    file: PathBuf,
+    /// The file to open, or `None` for the Settings window.
+    file: Option<PathBuf>,
     mode: ThemeMode,
-    /// The window's width in points; its height is always [`WINDOW`]'s.
-    width: f32,
+    /// A theme's name in `theme::THEMES`.
+    theme: &'static str,
+    /// The window's size in points.
+    size: (f32, f32),
     steps: Vec<Step>,
 }
 
@@ -473,6 +551,8 @@ enum Step {
     SelectColumn(&'static str),
     /// Runs arbitrary code against the document.
     With(Box<DocFn>),
+    /// Runs arbitrary code against the Settings window's view.
+    Settings(Box<SettingsFn>),
     /// Lets half a second pass, on the app's clock and the real one, so
     /// animations (a notification sliding in) finish.
     Wait,
@@ -480,17 +560,37 @@ enum Step {
 
 /// Code a [`Step::With`] runs against the document.
 type DocFn = dyn FnOnce(&mut Document, &mut Window, &mut Context<Document>);
+/// Code a [`Step::Settings`] runs against the Settings view.
+type SettingsFn = dyn FnOnce(&mut SettingsView, &mut Window, &mut Context<SettingsView>);
 
 impl Scenario {
     /// A dark-theme shot of `file` (relative to the repo root) with no steps.
     fn new(name: &'static str, file: impl AsRef<Path>) -> Self {
         Self {
             name,
-            file: repo_root().join(file),
+            file: Some(repo_root().join(file)),
             mode: ThemeMode::Dark,
-            width: WINDOW.0,
+            theme: "Default",
+            size: WINDOW,
             steps: Vec::new(),
         }
+    }
+
+    /// A dark-theme shot of the Settings window, on its Appearance page.
+    fn settings(name: &'static str) -> Self {
+        Self {
+            name,
+            file: None,
+            mode: ThemeMode::Dark,
+            theme: "Default",
+            size: SETTINGS_WINDOW,
+            steps: Vec::new(),
+        }
+    }
+
+    fn theme(mut self, theme: &'static str) -> Self {
+        self.theme = theme;
+        self
     }
 
     fn light(mut self) -> Self {
@@ -499,7 +599,7 @@ impl Scenario {
     }
 
     fn width(mut self, width: f32) -> Self {
-        self.width = width;
+        self.size.0 = width;
         self
     }
 
@@ -526,6 +626,14 @@ impl Scenario {
         self
     }
 
+    fn settings_with(
+        mut self,
+        f: impl FnOnce(&mut SettingsView, &mut Window, &mut Context<SettingsView>) + 'static,
+    ) -> Self {
+        self.steps.push(Step::Settings(Box::new(f)));
+        self
+    }
+
     /// Opens the file in a fresh offscreen app, runs the steps and returns the PNG's path.
     fn render(self, out_dir: &Path) -> PathBuf {
         let name = self.name;
@@ -534,45 +642,69 @@ impl Scenario {
             Arc::new(gpui_kit::assets::AllAssets),
             gpui_kit::platform::current_headless_renderer,
         );
-        let (window, workspace) = cx.update(|cx| {
+        // Settings start from the defaults each run; a scenario that changes
+        // them writes only to this scratch file.
+        let settings_file = std::env::temp_dir().join(format!("da-shots-settings-{name}.json"));
+        let _ = std::fs::remove_file(&settings_file);
+        let (window, doc, settings_view) = cx.update(|cx| {
             gpui_kit::init(cx);
             filter::init(cx);
-            sql::init(cx);
             import::init(cx);
             document::init(cx);
+            settings::load(settings_file, cx);
+            crate::keymap::init(cx);
             cx.set_global(Windows::default());
             // Never written: nothing in a scenario edits the recent list.
             cx.set_global(RecentStore::load(out_dir.join("recent.json")));
+            let store = cx.global_mut::<SettingsStore>();
+            store.settings.theme = self.theme.into();
+            store.settings.appearance = match self.mode {
+                ThemeMode::Light => Appearance::Light,
+                ThemeMode::Dark => Appearance::Dark,
+            };
 
             let options = WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(Bounds {
                     origin: point(px(0.), px(0.)),
-                    size: size(px(self.width), px(WINDOW.1)),
+                    size: size(px(self.size.0), px(self.size.1)),
                 })),
                 focus: true,
                 show: false,
                 ..TitleBar::window_options()
             };
-            let path = self.file.clone();
-            let opened = gpui_kit::open_window(options, cx, |window, cx| {
-                cx.new(|cx| Workspace::new(Some(path), window, cx))
-            })
-            .unwrap_or_else(|err| panic!("{name}: couldn't open a window: {err:#}"));
-            cx.global_mut::<Windows>().0.push(opened.clone());
+            let opened = match self.file.clone() {
+                Some(path) => {
+                    let (window, workspace) = gpui_kit::open_window(options, cx, |window, cx| {
+                        cx.new(|cx| Workspace::new(Some(path), window, cx))
+                    })
+                    .unwrap_or_else(|err| panic!("{name}: couldn't open a window: {err:#}"));
+                    cx.global_mut::<Windows>()
+                        .0
+                        .push((window, workspace.clone()));
+                    let doc = workspace.read(cx).document().cloned();
+                    (window, doc, None)
+                }
+                None => {
+                    let (window, view) = gpui_kit::open_window(options, cx, |window, cx| {
+                        cx.new(|cx| SettingsView::new(window, cx))
+                    })
+                    .unwrap_or_else(|err| panic!("{name}: couldn't open a window: {err:#}"));
+                    (window, None, Some(view))
+                }
+            };
             // Opening a window syncs the theme to its appearance, so pick ours after.
-            Theme::change(self.mode, None, cx);
+            settings::apply_theme(None, cx);
             opened
         });
-        let doc = cx
-            .update(|cx| workspace.read(cx).document().cloned())
-            .unwrap_or_else(|| panic!("{name}: the window has no document"));
+        let doc = doc.as_ref();
+        let document = || doc.unwrap_or_else(|| panic!("{name}: the window has no document"));
 
-        settle(&mut cx, window, &doc, name, "opening");
+        settle(&mut cx, window, doc, name, "opening");
         for step in self.steps {
             let what = match &step {
                 Step::Action(action) => action.name(),
                 Step::SelectColumn(_) => "select column",
-                Step::With(_) => "custom step",
+                Step::With(_) | Step::Settings(_) => "custom step",
                 Step::Wait => "wait",
             };
             match step {
@@ -580,11 +712,17 @@ impl Scenario {
                     .update_window(window, |_, window, cx| window.dispatch_action(action, cx))
                     .unwrap(),
                 Step::SelectColumn(column) => cx.update(|cx| {
-                    doc.update(cx, |doc, cx| doc.select_column_named(column, cx));
+                    document().update(cx, |doc, cx| doc.select_column_named(column, cx));
                 }),
                 Step::With(f) => cx
                     .update_window(window, |_, window, cx| {
-                        doc.update(cx, |doc, cx| f(doc, window, cx))
+                        document().update(cx, |doc, cx| f(doc, window, cx))
+                    })
+                    .unwrap(),
+                Step::Settings(f) => cx
+                    .update_window(window, |_, window, cx| {
+                        let view = settings_view.as_ref().expect("a Settings scenario");
+                        view.update(cx, |view, cx| f(view, window, cx))
                     })
                     .unwrap(),
                 Step::Wait => {
@@ -596,7 +734,7 @@ impl Scenario {
                     }
                 }
             }
-            settle(&mut cx, window, &doc, name, what);
+            settle(&mut cx, window, doc, name, what);
         }
 
         let image = cx
@@ -610,12 +748,13 @@ impl Scenario {
     }
 }
 
-/// Draws and runs tasks until the document reports nothing pending, then
-/// draws once more so the frame shows the final state. Panics on a timeout.
+/// Draws and runs tasks until the document (if the window has one) reports
+/// nothing pending, then draws once more so the frame shows the final state.
+/// Panics on a timeout.
 fn settle(
     cx: &mut HeadlessAppContext,
     window: AnyWindowHandle,
-    doc: &Entity<Document>,
+    doc: Option<&Entity<Document>>,
     name: &str,
     after: &str,
 ) {
@@ -626,7 +765,7 @@ fn settle(
         cx.run_until_parked();
         // Let debounces and other short timers fire.
         cx.advance_clock(Duration::from_millis(100));
-        pending = cx.update(|cx| doc.read(cx).pending_work(cx));
+        pending = cx.update(|cx| doc.and_then(|doc| doc.read(cx).pending_work(cx)));
         if pending.is_none() {
             draw(cx, window);
             return;

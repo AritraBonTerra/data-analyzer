@@ -169,6 +169,19 @@ impl GridDelegate {
         widened
     }
 
+    /// Replaces the column widths (at actual size), as a resize by hand
+    /// leaves them. Ignored if the count doesn't match the columns.
+    /// How many data columns there are (the row-number gutter isn't one).
+    pub fn column_count(&self) -> usize {
+        self.widths.len()
+    }
+
+    pub fn set_widths(&mut self, widths: Vec<f32>) {
+        if widths.len() == self.widths.len() {
+            self.widths = widths;
+        }
+    }
+
     pub fn profile(&self, col: usize) -> Option<&ColumnProfile> {
         self.profiles.get(col).and_then(|p| p.as_ref())
     }
@@ -293,7 +306,7 @@ impl GridDelegate {
             Distribution::Histogram(bins) => {
                 let max = bins.iter().map(|b| b.count).max().unwrap_or(0).max(1) as f32;
                 h_flex()
-                    .h(px(14.))
+                    .h(theme::scaled(14., cx))
                     .w_full()
                     .items_end()
                     .gap(px(1.))
@@ -302,7 +315,7 @@ impl GridDelegate {
                         let height = if bin.count == 0 {
                             px(1.)
                         } else {
-                            px((share * 14.0).max(2.0))
+                            theme::scaled((share * 14.0).max(2.0), cx)
                         };
                         div()
                             .flex_1()
@@ -339,7 +352,7 @@ impl GridDelegate {
                     .gap(px(3.))
                     .child(
                         h_flex()
-                            .h(px(5.))
+                            .h(theme::scaled(5., cx))
                             .w_full()
                             .rounded_full()
                             .overflow_hidden()
@@ -355,7 +368,7 @@ impl GridDelegate {
                     .when_some(label, |this, label| {
                         this.child(
                             div()
-                                .text_size(px(10.))
+                                .text_size(theme::scaled(10., cx))
                                 .text_color(cx.theme().muted_foreground)
                                 .truncate()
                                 .child(label),
@@ -386,10 +399,10 @@ impl TableDelegate for GridDelegate {
         self.rows as usize
     }
 
-    fn column(&self, col_ix: usize, _: &App) -> Column {
+    fn column(&self, col_ix: usize, cx: &App) -> Column {
         if col_ix == 0 {
             return Column::new("#", "")
-                .width(px(self.gutter_width))
+                .width(theme::scaled(self.gutter_width, cx))
                 .fixed_left()
                 .resizable(false)
                 .movable(false)
@@ -402,8 +415,9 @@ impl TableDelegate for GridDelegate {
         };
         let width = self.widths.get(col).copied().unwrap_or(140.0);
         Column::new(column.name.clone(), column.name.clone())
-            .width(px(width))
-            .max_width(px(2000.))
+            // Widths are kept at actual size and drawn at the current zoom.
+            .width(theme::scaled(width, cx))
+            .max_width(theme::scaled(2000., cx))
             .movable(false)
             .map(|c| {
                 if column.kind == ColumnKind::Number {
@@ -459,7 +473,11 @@ impl TableDelegate for GridDelegate {
                         .size(px(12.)),
                 )
                 .when(multi, |this| {
-                    this.child(div().text_size(px(10.)).child((rank + 1).to_string()))
+                    this.child(
+                        div()
+                            .text_size(theme::scaled(10., cx))
+                            .child((rank + 1).to_string()),
+                    )
                 })
         });
 
@@ -539,7 +557,7 @@ impl TableDelegate for GridDelegate {
                             .truncate()
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(cx.theme().foreground)
-                            .text_size(px(12.5))
+                            .text_size(theme::scaled(12.5, cx))
                             .child(name),
                     )
                     .children(sort_badge)
@@ -559,7 +577,7 @@ impl TableDelegate for GridDelegate {
                         this.child(
                             div()
                                 .flex_shrink_0()
-                                .text_size(px(10.))
+                                .text_size(theme::scaled(10., cx))
                                 .font_features(tabular())
                                 .text_color(if high_nulls { palette.warning } else { muted })
                                 .child(text),
@@ -585,7 +603,7 @@ impl TableDelegate for GridDelegate {
                 .justify_end()
                 .pr(px(8.))
                 .bg(palette.gutter)
-                .text_size(px(11.))
+                .text_size(theme::scaled(11., cx))
                 .font_features(tabular())
                 .text_color(cx.theme().muted_foreground.opacity(0.8))
                 .child(format::group_digits(row_ix as u64 + 1))
@@ -616,7 +634,7 @@ impl TableDelegate for GridDelegate {
             }
             Some(None) => div()
                 .text_color(palette.null)
-                .text_size(px(11.))
+                .text_size(theme::scaled(11., cx))
                 .child("null")
                 .into_any_element(),
             Some(Some(text)) => div()

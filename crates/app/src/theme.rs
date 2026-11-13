@@ -5,7 +5,7 @@
 use std::sync::Arc;
 
 use da_core::ColumnKind;
-use gpui_kit::component::{ActiveTheme, kbd::Kbd};
+use gpui_kit::component::ActiveTheme;
 use gpui_kit::*;
 
 /// Row height in the grid. Tight enough to show plenty of rows, roomy enough to read.
@@ -16,6 +16,81 @@ pub const HEADER_HEIGHT: f32 = 54.0;
 pub const TOOLBAR_HEIGHT: f32 = 46.0;
 /// Width of the stats side panel.
 pub const STATS_WIDTH: f32 = 312.0;
+
+/// Text size at actual size (zoom 1). Zoom scales the theme's font size, which
+/// sets the window's rem, so everything sized in rems follows.
+pub const BASE_FONT_SIZE: f32 = 16.0;
+/// Monospace text size at actual size.
+pub const BASE_MONO_FONT_SIZE: f32 = 13.0;
+
+/// The current zoom: 1 at actual size, 1.25 when everything is a quarter bigger.
+pub fn zoom(cx: &App) -> f32 {
+    cx.theme().font_size.as_f32() / BASE_FONT_SIZE
+}
+
+/// `points` at the current zoom. For the layout constants above, which are in
+/// pixels and so wouldn't follow the rem size on their own.
+pub fn scaled(points: f32, cx: &App) -> Pixels {
+    px((points * zoom(cx)).round())
+}
+
+/// A theme people can pick in Settings: a light and a dark variant registered
+/// with gpui-component, and the accent for data marks in each.
+pub struct ThemeFamily {
+    pub name: &'static str,
+    /// Names of its variants in the theme registry.
+    pub light: &'static str,
+    pub dark: &'static str,
+    /// The theme file declaring both variants; `None` for the built-in default.
+    pub json: Option<&'static str>,
+    /// Accent for data marks (see [`Palette::accent`]) in light and dark.
+    pub accent: (u32, u32),
+}
+
+/// Every theme, in the order Settings lists them. The first is the default.
+/// The others are files in `crates/app/themes`: the default theme with its
+/// greys tinted, and an accent picked to read well on charts in both variants.
+pub const THEMES: &[ThemeFamily] = &[
+    ThemeFamily {
+        name: "Default",
+        light: "Default Light",
+        dark: "Default Dark",
+        json: None,
+        accent: (0x1b6eda, 0x67a4f4),
+    },
+    // Warm paper and ink; a warm charcoal when dark.
+    ThemeFamily {
+        name: "Paper",
+        light: "Paper Light",
+        dark: "Paper Dark",
+        json: Some(include_str!("../themes/paper.json")),
+        accent: (0x1a7f76, 0x5cc4b5),
+    },
+    // Cool blue-greys.
+    ThemeFamily {
+        name: "Slate",
+        light: "Slate Light",
+        dark: "Slate Dark",
+        json: Some(include_str!("../themes/slate.json")),
+        accent: (0x4c5fd5, 0x8c9cf7),
+    },
+    // Pure black and white, with stronger borders and secondary text.
+    ThemeFamily {
+        name: "High Contrast",
+        light: "High Contrast Light",
+        dark: "High Contrast Dark",
+        json: Some(include_str!("../themes/high-contrast.json")),
+        accent: (0x0047c2, 0x79b8ff),
+    },
+];
+
+/// The theme named `name`, or the default when there's none by that name.
+pub fn family(name: &str) -> &'static ThemeFamily {
+    THEMES
+        .iter()
+        .find(|family| family.name == name)
+        .unwrap_or(&THEMES[0])
+}
 
 /// Enables tabular figures so digits line up in columns and counters don't jitter.
 pub fn tabular() -> FontFeatures {
@@ -45,11 +120,8 @@ pub struct Palette {
 pub fn palette(cx: &App) -> Palette {
     let theme = cx.theme();
     let dark = theme.is_dark();
-    let accent = if dark {
-        hsla(214. / 360., 0.86, 0.68, 1.0)
-    } else {
-        hsla(214. / 360., 0.78, 0.48, 1.0)
-    };
+    let (light_accent, dark_accent) = family(&crate::settings::current(cx).theme).accent;
+    let accent: Hsla = rgb(if dark { dark_accent } else { light_accent }).into();
     Palette {
         accent,
         null: theme.muted_foreground.opacity(0.55),
@@ -101,18 +173,14 @@ pub fn kind_icon(kind: ColumnKind) -> &'static str {
     }
 }
 
-/// A key binding as the platform writes it: `"cmd-shift-c"` is `⇧⌘C` on
-/// macOS, `"ctrl-shift-c"` is `Ctrl+Shift+C` on Linux.
-pub fn keys(binding: &'static str) -> String {
-    Keystroke::parse(binding)
-        .map(|keystroke| Kbd::format(&keystroke))
-        .unwrap_or_else(|_| binding.into())
-}
-
-/// A keyboard-shortcut style hint for a binding, e.g. `⌘F`.
-pub fn shortcut_hint(binding: &'static str, cx: &App) -> Div {
-    div()
-        .text_xs()
-        .text_color(cx.theme().muted_foreground.opacity(0.7))
-        .child(keys(binding))
+/// A keyboard-shortcut style hint for command `id` (see `keymap::COMMANDS`),
+/// e.g. `⌘F`, or `None` when the command has no shortcut.
+pub fn shortcut_hint(id: &str, cx: &App) -> Option<Div> {
+    let keys = crate::keymap::label(id, cx)?;
+    Some(
+        div()
+            .text_xs()
+            .text_color(cx.theme().muted_foreground.opacity(0.7))
+            .child(keys),
+    )
 }

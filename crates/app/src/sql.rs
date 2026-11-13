@@ -10,14 +10,8 @@ use crate::theme::{self, tabular};
 
 actions!(sql, [RunQuery, CancelQuery]);
 
-const CONTEXT: &str = "SqlPanel";
-
-pub fn init(cx: &mut App) {
-    cx.bind_keys([
-        KeyBinding::new(cmd_or_ctrl!("enter"), RunQuery, Some(CONTEXT)),
-        KeyBinding::new(cmd_or_ctrl!("."), CancelQuery, Some(CONTEXT)),
-    ]);
-}
+/// The SQL editor's key context. Run and Cancel are bound in `keymap`.
+pub const CONTEXT: &str = "SqlPanel";
 
 #[derive(Clone, Debug)]
 pub enum SqlEvent {
@@ -53,14 +47,22 @@ impl SqlPanel {
                 .line_number(false)
                 .placeholder("SELECT * FROM data LIMIT 100")
         });
-        let subscriptions = vec![cx.subscribe(&editor, |this, _, event: &InputEvent, cx| {
-            if let InputEvent::PressEnter {
-                secondary: true, ..
-            } = event
-            {
-                this.run(&RunQuery, cx);
-            }
-        })];
+        let subscriptions =
+            vec![
+                cx.subscribe_in(&editor, window, |_, _, event: &InputEvent, window, cx| {
+                    // The editor's own ⌘Enter binding sits deeper than any command's
+                    // and takes the key first, so pass it on to whichever command has
+                    // ⌘Enter now (Run Query unless it was changed). Other shortcuts
+                    // reach their commands directly.
+                    if let InputEvent::PressEnter {
+                        secondary: true, ..
+                    } = event
+                        && let Some(command) = crate::keymap::owner("secondary-enter", cx)
+                    {
+                        window.dispatch_action(command.action(), cx);
+                    }
+                }),
+            ];
         Self {
             focus_handle: cx.focus_handle(),
             editor,
@@ -259,10 +261,9 @@ impl Render for SqlPanel {
                             })
                             .child(
                                 self.button("run-query", "Run", true, cx)
-                                    .child(
-                                        theme::shortcut_hint(cmd_or_ctrl!("enter"), cx)
-                                            .text_color(cx.theme().primary_foreground.opacity(0.7)),
-                                    )
+                                    .children(theme::shortcut_hint("run_query", cx).map(|hint| {
+                                        hint.text_color(cx.theme().primary_foreground.opacity(0.7))
+                                    }))
                                     .on_click(
                                         cx.listener(|this, _, _, cx| this.run(&RunQuery, cx)),
                                     ),
@@ -273,7 +274,7 @@ impl Render for SqlPanel {
                 div()
                     .flex_1()
                     .min_h_0()
-                    .text_size(px(13.))
+                    .text_size(theme::scaled(13., cx))
                     .child(Editor::new(&self.editor).appearance(false).h_full()),
             )
             .when_some(error, |this, message| {
@@ -307,5 +308,80 @@ impl Render for SqlPanel {
                         ),
                 )
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// ⌘Enter typed in the editor, which the editor's own binding takes
+    /// first, goes to whichever command has ⌘Enter: Run Query by default,
+    /// Cancel Query once it's given ⌘Enter, and nothing once no command has it.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn cmd_enter_in_the_editor_follows_the_keymap() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+        use std::sync::Arc;
+
+        use gpui_kit::{
+            AppContext, Keystroke, OperatingSystem, TestAppContext, TestDispatcher,
+            VisualTestContext,
+        };
+
+        use super::{SqlEvent, SqlPanel};
+        use crate::keymap;
+
+        let dir = std::env::temp_dir().join(format!("da-sql-keys-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let cx = TestAppContext::build_with_text_system(
+            TestDispatcher::new(0),
+            None,
+            Arc::new(gpui_apple::AppleTextSystem::new()),
+        );
+        let app_cx = cx.clone();
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let (window, panel) = app_cx.update(|cx| {
+            gpui_kit::init(cx);
+            crate::settings::init(dir.join("settings.json"), cx);
+            // Changing a shortcut rebuilds the menus, which read these.
+            cx.set_global(crate::Windows::default());
+            cx.set_global(crate::recent::RecentStore::load(dir.join("recent.json")));
+            gpui_kit::open_window(Default::default(), cx, |window, cx| {
+                cx.new(|cx| SqlPanel::new(window, cx))
+            })
+            .unwrap()
+        });
+        let seen = events.clone();
+        app_cx.update(|cx| {
+            cx.subscribe(&panel, move |_, event: &SqlEvent, _| {
+                seen.borrow_mut().push(match event {
+                    SqlEvent::Run(_) => "run",
+                    SqlEvent::Cancel => "cancel",
+                    SqlEvent::ShowFile => "show file",
+                })
+            })
+            .detach()
+        });
+        let mut cx = VisualTestContext::from_window(window, &cx);
+        cx.update(|window, cx| panel.update(cx, |panel, cx| panel.focus(window, cx)));
+        cx.run_until_parked();
+
+        cx.simulate_keystrokes("cmd-enter");
+        assert_eq!(*events.borrow(), ["run"]);
+
+        let cmd_enter = Keystroke::parse_with_os("cmd-enter", OperatingSystem::Mac).unwrap();
+        cx.update(|_, cx| keymap::assign("cancel_query", Some(&cmd_enter), cx));
+        cx.simulate_keystrokes("cmd-enter");
+        assert_eq!(*events.borrow(), ["run", "cancel"]);
+
+        cx.update(|_, cx| keymap::assign("cancel_query", None, cx));
+        cx.simulate_keystrokes("cmd-enter");
+        assert_eq!(*events.borrow(), ["run", "cancel"]);
+
+        let _ = std::fs::remove_dir_all(dir);
+        // Dropping the app deadlocks in gpui-base's text-layout cleanup (see
+        // `settings_window`'s keyboard test), so it's leaked.
+        std::mem::forget(cx);
+        std::mem::forget(app_cx);
     }
 }

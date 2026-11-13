@@ -373,7 +373,7 @@ impl StatsPanel {
                                     .font_features(tabular())
                                     .text_color(muted)
                                     .child(SharedString::from(group_digits(count)))
-                                    .child(div().w(px(42.)).text_right().child(
+                                    .child(div().w(theme::scaled(42., cx)).text_right().child(
                                         SharedString::from(percent(
                                             count as f64 / total.max(1) as f64,
                                         )),
