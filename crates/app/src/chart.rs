@@ -607,7 +607,7 @@ impl ChartPanel {
                 .items_center()
                 .child(
                     div()
-                        .w(px(48.))
+                        .w(theme::scaled(48., cx))
                         .flex_shrink_0()
                         .text_xs()
                         .text_color(muted)
@@ -773,7 +773,7 @@ impl ChartPanel {
             }));
 
         v_flex()
-            .w(px(RAIL_WIDTH))
+            .w(theme::scaled(RAIL_WIDTH, cx))
             .flex_shrink_0()
             .h_full()
             .border_l_1()
@@ -832,9 +832,9 @@ impl ChartPanel {
                             h_flex()
                                 .gap(px(6.))
                                 .child(div().flex_1().min_w_0().child(y))
-                                .children(
-                                    aggregate.map(|a| div().w(px(96.)).flex_shrink_0().child(a)),
-                                )
+                                .children(aggregate.map(|a| {
+                                    div().w(theme::scaled(96., cx)).flex_shrink_0().child(a)
+                                }))
                                 .into_any_element(),
                         ))
                     })

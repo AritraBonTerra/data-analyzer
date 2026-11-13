@@ -262,6 +262,12 @@ pub fn can_bind(keystroke: &Keystroke) -> bool {
     !modifier_only && (m.platform || m.control || m.alt || function_key)
 }
 
+/// Whether two keystrokes press the same keys. A recorded keystroke also
+/// carries the character it typed (`key_char`), which a parsed one doesn't.
+fn same_keys(a: &Keystroke, b: &Keystroke) -> bool {
+    a.modifiers == b.modifiers && a.key == b.key
+}
+
 /// Gives command `id` the single shortcut `keystroke`, or none when `None`.
 /// Another command that had the same shortcut loses it; its name is
 /// returned so the caller can say so.
@@ -275,7 +281,7 @@ pub fn assign(id: &str, keystroke: Option<&Keystroke>, cx: &mut App) -> Option<&
             let current = shortcuts(other, cx);
             let kept: Vec<String> = current
                 .iter()
-                .filter(|keys| parse(keys, cx).as_ref() != Some(keystroke))
+                .filter(|keys| !parse(keys, cx).is_some_and(|other| same_keys(&other, keystroke)))
                 .cloned()
                 .collect();
             if kept.len() != current.len() {

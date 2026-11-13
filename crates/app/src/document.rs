@@ -2581,7 +2581,7 @@ impl Render for Document {
                         .when(self.show_sql, |this| {
                             this.child(
                                 div()
-                                    .h(px(SQL_HEIGHT))
+                                    .h(theme::scaled(SQL_HEIGHT, cx))
                                     .flex_shrink_0()
                                     .child(self.sql.clone()),
                             )

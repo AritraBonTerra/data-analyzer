@@ -122,10 +122,9 @@ pub fn current(cx: &App) -> Settings {
         .unwrap_or_default()
 }
 
-/// Loads the settings and the bundled themes, applies both and registers the
-/// actions. Call after every module's `init`, so the keymap sees their bindings.
-pub fn init(cx: &mut App) {
-    let file = crate::platform::data_dir().join("settings.json");
+/// Installs the store with the settings in `file` and registers the bundled
+/// themes. [`init`] calls it; the screenshot harness does too, with a scratch file.
+pub fn load(file: PathBuf, cx: &mut App) {
     cx.set_global(SettingsStore {
         settings: Settings::load(&file),
         file,
@@ -137,6 +136,13 @@ pub fn init(cx: &mut App) {
             eprintln!("couldn't load the {} theme: {err:#}", family.name);
         }
     }
+}
+
+/// Loads the settings in `file` and the bundled themes, applies both and
+/// registers the actions. Call after every module's `init`, so the keymap sees
+/// their bindings.
+pub fn init(file: PathBuf, cx: &mut App) {
+    load(file, cx);
     crate::keymap::init(cx);
     apply_theme(None, cx);
 

@@ -142,7 +142,7 @@ fn main() {
         document::init(cx);
         // After the other modules: it captures their bindings, adds the
         // changeable shortcuts and applies the theme.
-        settings::init(cx);
+        settings::init(platform::data_dir().join("settings.json"), cx);
         cx.set_app_identity(platform::BUNDLE_ID, "Data Analyzer");
         Theme::sync_scrollbar_appearance(cx);
         cx.set_global(Windows::default());

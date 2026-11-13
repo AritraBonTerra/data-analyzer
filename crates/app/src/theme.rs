@@ -48,13 +48,41 @@ pub struct ThemeFamily {
 }
 
 /// Every theme, in the order Settings lists them. The first is the default.
-pub const THEMES: &[ThemeFamily] = &[ThemeFamily {
-    name: "Default",
-    light: "Default Light",
-    dark: "Default Dark",
-    json: None,
-    accent: (0x1b6eda, 0x67a4f4),
-}];
+/// The others are files in `crates/app/themes`: the default theme with its
+/// greys tinted, and an accent picked to read well on charts in both variants.
+pub const THEMES: &[ThemeFamily] = &[
+    ThemeFamily {
+        name: "Default",
+        light: "Default Light",
+        dark: "Default Dark",
+        json: None,
+        accent: (0x1b6eda, 0x67a4f4),
+    },
+    // Warm paper and ink; a warm charcoal when dark.
+    ThemeFamily {
+        name: "Paper",
+        light: "Paper Light",
+        dark: "Paper Dark",
+        json: Some(include_str!("../themes/paper.json")),
+        accent: (0x1a7f76, 0x5cc4b5),
+    },
+    // Cool blue-greys.
+    ThemeFamily {
+        name: "Slate",
+        light: "Slate Light",
+        dark: "Slate Dark",
+        json: Some(include_str!("../themes/slate.json")),
+        accent: (0x4c5fd5, 0x8c9cf7),
+    },
+    // Pure black and white, with stronger borders and secondary text.
+    ThemeFamily {
+        name: "High Contrast",
+        light: "High Contrast Light",
+        dark: "High Contrast Dark",
+        json: Some(include_str!("../themes/high-contrast.json")),
+        accent: (0x0047c2, 0x79b8ff),
+    },
+];
 
 /// The theme named `name`, or the default when there's none by that name.
 pub fn family(name: &str) -> &'static ThemeFamily {
