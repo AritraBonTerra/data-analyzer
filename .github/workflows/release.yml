@@ -1,18 +1,21 @@
-# Builds and publishes a release when a tag v<version> is pushed: a signed and
-# notarized DMG for macOS (Apple Silicon) and an AppImage for Linux (x86_64 and
-# aarch64), each with the manifest its platform's updater reads. A tag
-# v<version>-dryrun.<n> runs every step except publishing, and keeps the files
-# as workflow artifacts instead.
+# Builds and publishes a release when a commit that changes the app version
+# lands on main: a signed and notarized DMG for macOS (Apple Silicon) and an
+# AppImage for Linux (x86_64 and aarch64), each with the manifest its
+# platform's updater reads. Pushes to main whose version is already released
+# stop after the first job. A tag v<version>-dryrun.<n> runs every step except
+# publishing, and keeps the files as workflow artifacts instead.
 name: Release
 
 on:
   push:
-    tags: ["v*"]
+    branches: [main]
+    tags: ["v*-dryrun.*"]
 
 permissions:
   contents: read
 
-# One release at a time; a second tag waits instead of cancelling the first.
+# One release at a time; a second run waits instead of cancelling the first, and
+# then finds the version released.
 concurrency:
   group: release
   cancel-in-progress: false
@@ -22,36 +25,34 @@ env:
   CARGO_INCREMENTAL: 0
 
 jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.plan.outputs.version }}
+      release: ${{ steps.plan.outputs.release }}
+      dry_run: ${{ steps.plan.outputs.dry_run }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Decide whether to release
+        id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/release-plan.sh "$GITHUB_REF_NAME" >>"$GITHUB_OUTPUT"
+
   build:
+    needs: plan
+    if: needs.plan.outputs.release == 'true'
     runs-on: macos-15
     timeout-minutes: 120
-    outputs:
-      version: ${{ steps.tag.outputs.version }}
-      dry_run: ${{ steps.tag.outputs.dry_run }}
     steps:
       # Full history: bundle.sh numbers builds with `git rev-list --count HEAD`.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
-
-      - name: Check tag against the app version
-        id: tag
-        run: scripts/release-tag.sh "$GITHUB_REF_NAME" >>"$GITHUB_OUTPUT"
-
-      # A real release must be a commit that is in main; a trial run can be anywhere.
-      - name: Check the tag is on main
-        env:
-          DRY_RUN: ${{ steps.tag.outputs.dry_run }}
-        run: |
-          if git merge-base --is-ancestor HEAD origin/main; then
-            echo "Tagged commit is in main."
-          elif [[ "$DRY_RUN" == false ]]; then
-            echo "::error::$GITHUB_REF_NAME is not on main. Merge first, then tag main."
-            exit 1
-          else
-            echo "Tagged commit is not in main (trial run, so that is fine)."
-          fi
 
       - name: Install Rust from rust-toolchain.toml
         run: rustup toolchain install
@@ -104,7 +105,7 @@ jobs:
       - name: Sign DMG and write latest.json
         env:
           UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
-          VERSION: ${{ steps.tag.outputs.version }}
+          VERSION: ${{ needs.plan.outputs.version }}
         run: |
           key=$(mktemp) # created with mode 600
           trap 'rm -f "$key"' EXIT
@@ -117,7 +118,7 @@ jobs:
         with:
           name: release
           path: |
-            dist/Data-Analyzer-${{ steps.tag.outputs.version }}.dmg
+            dist/Data-Analyzer-${{ needs.plan.outputs.version }}.dmg
             dist/latest.json
           if-no-files-found: error
 
@@ -125,6 +126,8 @@ jobs:
   # oldest Ubuntu GitHub offers: an AppImage runs where glibc is at least the
   # build's (2.35 here).
   linux:
+    needs: plan
+    if: needs.plan.outputs.release == 'true'
     strategy:
       matrix:
         include:
@@ -138,10 +141,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-
-      - name: Check tag against the app version
-        id: tag
-        run: scripts/release-tag.sh "$GITHUB_REF_NAME" >>"$GITHUB_OUTPUT"
 
       - name: Install the windowing libraries GPUI links
         run: scripts/linux-deps.sh
@@ -159,7 +158,7 @@ jobs:
       - name: Sign the AppImage and write its manifest
         env:
           UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
-          VERSION: ${{ steps.tag.outputs.version }}
+          VERSION: ${{ needs.plan.outputs.version }}
           ARCH: ${{ matrix.arch }}
         run: |
           key=$(mktemp) # created with mode 600
@@ -178,8 +177,8 @@ jobs:
           if-no-files-found: error
 
   publish:
-    needs: [build, linux]
-    if: needs.build.outputs.dry_run == 'false'
+    needs: [plan, build, linux]
+    if: needs.plan.outputs.release == 'true' && needs.plan.outputs.dry_run == 'false'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -192,9 +191,10 @@ jobs:
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ needs.build.outputs.version }}
+          VERSION: ${{ needs.plan.outputs.version }}
+        # Tags the commit that was built as v<version>.
         run: |
-          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag \
+          gh release create "v$VERSION" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
             --generate-notes "Data-Analyzer-$VERSION.dmg" latest.json \
             Data-Analyzer-x86_64.AppImage latest-linux-x86_64.json \
             Data-Analyzer-aarch64.AppImage latest-linux-aarch64.json
